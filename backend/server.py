@@ -1070,6 +1070,14 @@ async def root():
     }
 
 
+@api_router.get("/health")
+async def health():
+    """Lightweight keep-alive endpoint. Ping every 1-5 min via UptimeRobot
+    or similar to prevent the deployed container from going idle and
+    pausing the background indexer that pushes Telegram alerts."""
+    return {"ok": True, "ts": now_iso()}
+
+
 @api_router.get("/stats")
 async def stats():
     total_events = await db.claim_events.count_documents({})
