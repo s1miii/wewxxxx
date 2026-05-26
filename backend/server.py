@@ -514,6 +514,9 @@ def build_telegram_message(event: Dict[str, Any]) -> Dict[str, Any]:
             {"text": "💰 Buy", "url": f"https://t.me/based_rescue_bot?start=r_botprivacy_b_{token_addr}"},
         ])
         keyboard.append([
+            {"text": "📈 GMGN", "url": f"https://gmgn.ai/base/token/{token_addr}"},
+        ])
+        keyboard.append([
             {"text": "🔍 Search on X", "url": f"https://twitter.com/search?q={token_addr}"},
         ])
     if handle:
