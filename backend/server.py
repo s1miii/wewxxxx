@@ -858,10 +858,11 @@ async def process_released_event(
         )
 
         # Telegram alert — ONLY for live events (near tip), never for backfill
+        tg_sent = False
         if live_alerts and weth_amount > 0:
-            await send_telegram_alert(event, cli)
+            tg_sent = await send_telegram_alert(event, cli)
 
-        return True
+        return {"new": True, "tg_sent": tg_sent}
     except Exception as e:
         logger.error(f"process_released_event err: {e}")
         return False
@@ -901,11 +902,12 @@ async def onchain_indexer_loop():
                 alerts_sent = 0
                 for log in released_logs:
                     transfers_for_tx = tx_idx.get(log["transactionHash"], [])
-                    if await process_released_event(
+                    res = await process_released_event(
                         log, transfers_for_tx, block_ts_cache, cli, live_alerts=live_alerts
-                    ):
+                    )
+                    if isinstance(res, dict) and res.get("new"):
                         new_count += 1
-                        if live_alerts:
+                        if res.get("tg_sent"):
                             alerts_sent += 1
 
                 if released_logs:
