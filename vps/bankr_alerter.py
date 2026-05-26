@@ -20,12 +20,11 @@ import httpx
 # ===========================================================
 #                       CONFIG — EDIT HERE
 # ===========================================================
-TELEGRAM_BOT_TOKEN = "PASTE_YOUR_BOT_TOKEN_HERE"   # e.g. "8335281387:AAH..."
-TELEGRAM_CHAT_ID   = "PASTE_YOUR_CHAT_ID_HERE"     # e.g. "-1003915211068"
-BANKR_API_KEY      = "PASTE_YOUR_BANKR_API_KEY"    # optional, "" to disable
-
+BANKR_API_KEY= "bk_usr_XB2EnqT7_axHqfJSjhU9U66aKqmdeZcXYfypXRZRA"
+TELEGRAM_BOT_TOKEN= "8335281387:AAH5KfMmXgtkhERBtCEeQsCbraA6zEvr30w"
+TELEGRAM_CHAT_ID= "-1003915211068"
 # How often to poll the chain (seconds)
-POLL_INTERVAL_S = 15
+POLL_INTERVAL_S = 5
 
 # On first start, look back this many blocks (keep small to avoid old alerts)
 INITIAL_LOOKBACK_BLOCKS = 5
