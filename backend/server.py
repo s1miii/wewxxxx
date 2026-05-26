@@ -53,9 +53,12 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_API = (
     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else None
 )
-# Only alert if event's block is within this many blocks of current tip
-# (prevents flooding the channel with backfill events on first start)
 TELEGRAM_LIVE_BLOCK_THRESHOLD = 50
+
+# twitterapi.io — for fetching X profile (followers count)
+TWITTERAPI_IO_KEY = os.environ.get("TWITTERAPI_IO_KEY", "")
+TWITTERAPI_IO_BASE = "https://api.twitterapi.io"
+X_PROFILE_TTL_SECONDS = 3600  # cache profiles for 1h to avoid burning credits
 
 # Bankr / Doppler StreamableFeesLocker — RELEASED event topic
 # event Released(bytes32 indexed streamId, address indexed beneficiary,
@@ -376,6 +379,73 @@ async def fetch_dexscreener(token_addr: str, cli: httpx.AsyncClient) -> Dict[str
 
 
 # ============================================================
+# TWITTERAPI.IO — X profile (followers count) lookup with caching
+# ============================================================
+async def fetch_x_profile(username: str, cli: httpx.AsyncClient) -> Dict[str, Any]:
+    """Returns {followers, following, verified, bio, profilePicture} for an X handle.
+    Caches in MongoDB to avoid hitting the API on every event."""
+    if not username or not TWITTERAPI_IO_KEY:
+        return {}
+    username = username.strip().lstrip("@")
+    # check cache
+    cached = await db.x_profiles.find_one({"username_lower": username.lower()}, {"_id": 0})
+    if cached:
+        try:
+            age = (datetime.now(timezone.utc)
+                   - datetime.fromisoformat(cached["fetched_at"])).total_seconds()
+            if age < X_PROFILE_TTL_SECONDS:
+                return cached
+        except Exception:
+            pass
+
+    try:
+        r = await cli.get(
+            f"{TWITTERAPI_IO_BASE}/twitter/user/info",
+            params={"userName": username},
+            headers={"x-api-key": TWITTERAPI_IO_KEY},
+            timeout=8.0,
+        )
+        if r.status_code != 200:
+            return cached or {}
+        body = r.json()
+        if body.get("status") != "success":
+            return cached or {}
+        data = body.get("data") or {}
+        profile = {
+            "username": data.get("userName") or username,
+            "username_lower": (data.get("userName") or username).lower(),
+            "display_name": data.get("name"),
+            "followers": int(data.get("followers") or 0),
+            "following": int(data.get("following") or 0),
+            "tweets": int(data.get("statusesCount") or 0),
+            "is_verified": bool(data.get("isVerified") or data.get("isBlueVerified")),
+            "is_blue": bool(data.get("isBlueVerified")),
+            "bio": data.get("description"),
+            "profile_picture": data.get("profilePicture"),
+            "created_at": data.get("createdAt"),
+            "fetched_at": now_iso(),
+        }
+        await db.x_profiles.update_one(
+            {"username_lower": profile["username_lower"]},
+            {"$set": profile},
+            upsert=True,
+        )
+        return profile
+    except Exception as e:
+        logger.debug(f"x_profile fetch fail @{username}: {e}")
+        return cached or {}
+
+
+def _fmt_followers(n: int) -> str:
+    n = int(n or 0)
+    if n >= 1_000_000:
+        return f"{n/1e6:.1f}M"
+    if n >= 1_000:
+        return f"{n/1e3:.1f}K"
+    return f"{n}"
+
+
+# ============================================================
 # TELEGRAM ALERTING
 # ============================================================
 def _esc_html(s: Any) -> str:
@@ -405,8 +475,19 @@ def build_telegram_message(event: Dict[str, Any]) -> Dict[str, Any]:
     token_addr = event.get("token_address") or ""
     handle = event.get("claimer_handle")
     benef = event.get("beneficiary") or event.get("claimer_wallet") or ""
+    followers = int(event.get("claimer_followers") or 0)
+    verified = bool(event.get("claimer_verified"))
+    verified_badge = " ✅" if verified else ""
+
     if handle:
-        benef_line = f"@{_esc_html(handle)} (<code>{_esc_html(benef)}</code>)"
+        if followers > 0:
+            handle_str = (
+                f"@{_esc_html(handle)}{verified_badge} · "
+                f"<b>{_fmt_followers(followers)}</b> followers"
+            )
+        else:
+            handle_str = f"@{_esc_html(handle)}{verified_badge}"
+        benef_line = f"{handle_str}\n  <code>{_esc_html(benef)}</code>"
     else:
         benef_line = f"<code>{_esc_html(benef)}</code>"
 
@@ -432,7 +513,7 @@ def build_telegram_message(event: Dict[str, Any]) -> Dict[str, Any]:
         f"• Beneficiary: {benef_line}"
     )
 
-    # Inline keyboard — 3 buttons as requested + X Beneficiary if handle resolved
+    # Inline keyboard
     keyboard: List[List[Dict[str, str]]] = []
     if token_addr:
         keyboard.append([
@@ -445,8 +526,12 @@ def build_telegram_message(event: Dict[str, Any]) -> Dict[str, Any]:
             {"text": "🔍 Search on X", "url": f"https://twitter.com/search?q={token_addr}"},
         ])
     if handle:
+        followers_label = (
+            f" · {_fmt_followers(followers)} followers" if followers > 0 else ""
+        )
         keyboard.append([
-            {"text": f"𝕏 Beneficiary @{handle}", "url": f"https://twitter.com/{handle}"},
+            {"text": f"𝕏 Beneficiary @{handle}{followers_label}",
+             "url": f"https://twitter.com/{handle}"},
         ])
 
     return {"text": text, "reply_markup": {"inline_keyboard": keyboard}}
@@ -648,6 +733,13 @@ async def process_released_event(
         claimer_handle = creator.get("handle")
         claimer_avatar = creator.get("avatar")
 
+        # Fetch X profile (followers count) if we have a handle
+        x_profile: Dict[str, Any] = {}
+        if claimer_handle:
+            x_profile = await fetch_x_profile(claimer_handle, cli)
+            if x_profile.get("profile_picture"):
+                claimer_avatar = x_profile["profile_picture"]
+
         # Block timestamp from cache
         ts = block_ts_cache.get(log["blockNumber"])
         if ts is None:
@@ -704,6 +796,10 @@ async def process_released_event(
             "claimer_avatar": claimer_avatar
                 or (f"https://unavatar.io/x/{claimer_handle}" if claimer_handle
                     else f"https://api.dicebear.com/9.x/identicon/svg?seed={beneficiary}&backgroundColor=00FF66"),
+            "claimer_followers": int(x_profile.get("followers") or 0),
+            "claimer_following": int(x_profile.get("following") or 0),
+            "claimer_verified": bool(x_profile.get("is_verified") or x_profile.get("is_blue")),
+            "claimer_bio": x_profile.get("bio"),
             "released_token_amount": token_amount,
             "released_weth_amount": weth_amount,
             "released_usd": amount_usd,
@@ -925,16 +1021,37 @@ async def telegram_test():
     """Send a sample claim card to the Telegram channel to verify wiring."""
     if not TELEGRAM_API or not TELEGRAM_CHAT_ID:
         raise HTTPException(status_code=400, detail="Telegram not configured")
-    # Use the most recent claim with a handle for demo
     sample = await db.claim_events.find_one(
         {"claimer_handle": {"$ne": None}, "released_weth_amount": {"$gt": 0}},
         {"_id": 0}, sort=[("timestamp", -1)],
     )
     if not sample:
         raise HTTPException(status_code=404, detail="no claim events to send yet")
+    # Enrich with fresh X profile for the demo card
     async with httpx.AsyncClient() as cli:
+        if sample.get("claimer_handle"):
+            prof = await fetch_x_profile(sample["claimer_handle"], cli)
+            if prof:
+                sample["claimer_followers"] = int(prof.get("followers") or 0)
+                sample["claimer_following"] = int(prof.get("following") or 0)
+                sample["claimer_verified"] = bool(prof.get("is_verified") or prof.get("is_blue"))
+                sample["claimer_bio"] = prof.get("bio")
+                # propagate to all events for this handle
+                await db.claim_events.update_many(
+                    {"claimer_handle": sample["claimer_handle"]},
+                    {"$set": {
+                        "claimer_followers": sample["claimer_followers"],
+                        "claimer_verified": sample["claimer_verified"],
+                    }},
+                )
         ok = await send_telegram_alert(sample, cli)
-    return {"sent": ok, "sample_id": sample["id"], "token": sample.get("token_symbol")}
+    return {
+        "sent": ok,
+        "sample_id": sample["id"],
+        "token": sample.get("token_symbol"),
+        "handle": sample.get("claimer_handle"),
+        "followers": sample.get("claimer_followers"),
+    }
 
 
 @api_router.get("/")
@@ -1277,6 +1394,7 @@ async def startup_event():
     await db.tokens.create_index([("creator_handle", 1)])
     await db.bankr_launches.create_index([("tokenAddress", 1)], unique=True)
     await db.bankr_launches.create_index([("feeRecipient.walletAddress", 1)])
+    await db.x_profiles.create_index([("username_lower", 1)], unique=True)
 
     await fetch_eth_price()
     _bg_tasks.append(asyncio.create_task(launches_syncer_loop()))
