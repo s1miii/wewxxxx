@@ -1,0 +1,16 @@
+[Unit]
+Description=Bankr Bot Telegram Alerter
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bankr-alerter
+ExecStart=/home/ubuntu/bankr-alerter/venv/bin/python bankr_alerter.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/bankr-alerter.log
+StandardError=append:/var/log/bankr-alerter.log
+
+[Install]
+WantedBy=multi-user.target
