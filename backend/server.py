@@ -476,19 +476,9 @@ def build_telegram_message(event: Dict[str, Any]) -> Dict[str, Any]:
     token_addr = event.get("token_address") or ""
     handle = event.get("claimer_handle")
     benef = event.get("beneficiary") or event.get("claimer_wallet") or ""
-    followers = int(event.get("claimer_followers") or 0)
-    verified = bool(event.get("claimer_verified"))
-    verified_badge = " ✅" if verified else ""
 
     if handle:
-        if followers > 0:
-            handle_str = (
-                f"@{_esc_html(handle)}{verified_badge} · "
-                f"<b>{_fmt_followers(followers)}</b> followers"
-            )
-        else:
-            handle_str = f"@{_esc_html(handle)}{verified_badge}"
-        benef_line = f"{handle_str}\n  <code>{_esc_html(benef)}</code>"
+        benef_line = f"@{_esc_html(handle)}\n  <code>{_esc_html(benef)}</code>"
     else:
         benef_line = f"<code>{_esc_html(benef)}</code>"
 
@@ -527,11 +517,8 @@ def build_telegram_message(event: Dict[str, Any]) -> Dict[str, Any]:
             {"text": "🔍 Search on X", "url": f"https://twitter.com/search?q={token_addr}"},
         ])
     if handle:
-        followers_label = (
-            f" · {_fmt_followers(followers)} followers" if followers > 0 else ""
-        )
         keyboard.append([
-            {"text": f"𝕏 Beneficiary @{handle}{followers_label}",
+            {"text": f"𝕏 Beneficiary @{handle}",
              "url": f"https://twitter.com/{handle}"},
         ])
 
@@ -739,13 +726,13 @@ async def process_released_event(
                 creator = live
         claimer_handle = creator.get("handle")
         claimer_avatar = creator.get("avatar")
+        if not claimer_avatar and claimer_handle:
+            claimer_avatar = f"https://unavatar.io/x/{claimer_handle}"
 
-        # Fetch X profile (followers count) if we have a handle
+        # X profile lookup (followers / verified) is intentionally skipped here
+        # so Telegram alerts go out as fast as possible. The dashboard can fetch
+        # it lazily for the claimer-detail page.
         x_profile: Dict[str, Any] = {}
-        if claimer_handle:
-            x_profile = await fetch_x_profile(claimer_handle, cli)
-            if x_profile.get("profile_picture"):
-                claimer_avatar = x_profile["profile_picture"]
 
         # Block timestamp from cache
         ts = block_ts_cache.get(log["blockNumber"])
