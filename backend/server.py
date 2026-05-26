@@ -47,6 +47,16 @@ BANKR_HEADERS = (
 )
 DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
 
+# Telegram alerting
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_API = (
+    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else None
+)
+# Only alert if event's block is within this many blocks of current tip
+# (prevents flooding the channel with backfill events on first start)
+TELEGRAM_LIVE_BLOCK_THRESHOLD = 50
+
 # Bankr / Doppler StreamableFeesLocker — RELEASED event topic
 # event Released(bytes32 indexed streamId, address indexed beneficiary,
 #                uint256 token0Amount, uint256 token1Amount)
@@ -366,6 +376,105 @@ async def fetch_dexscreener(token_addr: str, cli: httpx.AsyncClient) -> Dict[str
 
 
 # ============================================================
+# TELEGRAM ALERTING
+# ============================================================
+def _esc_html(s: Any) -> str:
+    if s is None:
+        return ""
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _fmt_compact_usd(v: float) -> str:
+    v = float(v or 0)
+    if v >= 1_000_000_000:
+        return f"${v/1e9:.2f}B"
+    if v >= 1_000_000:
+        return f"${v/1e6:.2f}M"
+    if v >= 1_000:
+        return f"${v/1e3:.2f}K"
+    return f"${v:,.2f}"
+
+
+def _fmt_amount(v: float, max_dec: int = 4) -> str:
+    v = float(v or 0)
+    return f"{v:,.{max_dec}f}"
+
+
+def build_telegram_message(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the Telegram message + inline keyboard for a claim event."""
+    token_addr = event.get("token_address") or ""
+    handle = event.get("claimer_handle")
+    benef = event.get("beneficiary") or event.get("claimer_wallet") or ""
+    benef_short = f"{benef[:6]}…{benef[-4:]}" if benef else "?"
+    if handle:
+        benef_line = f"@{_esc_html(handle)} (<code>{benef_short}</code>)"
+    else:
+        benef_line = f"<code>{benef_short}</code>"
+
+    symbol = _esc_html(event.get("token_symbol") or "?")
+    name = _esc_html(event.get("token_name") or "?")
+    tok_amount = _fmt_amount(event.get("released_token_amount") or 0)
+    weth_amount = _fmt_amount(event.get("released_weth_amount") or 0, max_dec=6)
+    usd_amount = _fmt_compact_usd(event.get("released_usd") or 0)
+    mc = _fmt_compact_usd(event.get("market_cap_usd") or 0)
+    liq = _fmt_compact_usd(event.get("liquidity_usd") or 0)
+    contract_short = f"{token_addr[:6]}…{token_addr[-4:]}" if token_addr else "?"
+
+    text = (
+        "🎉 <b>NEW BANKR FEE CLAIMED!</b>\n\n"
+        "<b>Token Information:</b>\n"
+        f"• Name: <b>{name}</b>\n"
+        f"• Symbol: <b>${symbol}</b>\n"
+        f"• Contract: <code>{contract_short}</code>\n"
+        f"• Market Cap: <b>{mc}</b>\n"
+        f"• Liquidity: <b>{liq}</b>\n\n"
+        "<b>Released to Beneficiary:</b>\n"
+        f"• Token Amount: <b>{tok_amount} ${symbol}</b>\n"
+        f"• ETH Amount: <b>{weth_amount} ETH</b> ({usd_amount})\n"
+        f"• Beneficiary: {benef_line}"
+    )
+
+    # Inline keyboard — 3 buttons as requested
+    keyboard: List[List[Dict[str, str]]] = []
+    if token_addr:
+        keyboard.append([
+            {"text": "🚀 Bankr Launch", "url": f"https://bankr.bot/launches/{token_addr}"},
+        ])
+        keyboard.append([
+            {"text": "💰 Buy", "url": f"https://t.me/based_rescue_bot?start=r_botprivacy_b_{token_addr}"},
+        ])
+        keyboard.append([
+            {"text": "🔍 Search on X", "url": f"https://twitter.com/search?q={token_addr}"},
+        ])
+
+    return {"text": text, "reply_markup": {"inline_keyboard": keyboard}}
+
+
+async def send_telegram_alert(event: Dict[str, Any], cli: httpx.AsyncClient) -> bool:
+    if not TELEGRAM_API or not TELEGRAM_CHAT_ID:
+        return False
+    try:
+        msg = build_telegram_message(event)
+        r = await cli.post(
+            f"{TELEGRAM_API}/sendMessage",
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": msg["text"],
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+                "reply_markup": msg["reply_markup"],
+            },
+            timeout=10.0,
+        )
+        if r.status_code == 200 and r.json().get("ok"):
+            return True
+        logger.warning(f"telegram alert failed: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        logger.warning(f"telegram alert exception: {e}")
+    return False
+
+
+# ============================================================
 # CORE — process Released events
 # ============================================================
 async def rpc_unfiltered(method: str, params: list, cli: httpx.AsyncClient,
@@ -451,6 +560,7 @@ async def process_released_event(
     tx_transfers: List[Dict[str, Any]],
     block_ts_cache: Dict[str, int],
     cli: httpx.AsyncClient,
+    live_alerts: bool = False,
 ) -> bool:
     """Returns True if a new claim event was inserted."""
     try:
@@ -647,6 +757,11 @@ async def process_released_event(
             f"{token_amount:.4f} ${token_symbol} + {weth_amount:.6f} ETH "
             f"(MC ${market_cap_usd:,.0f}) tx={tx_hash[:12]}"
         )
+
+        # Telegram alert — ONLY for live events (near tip), never for backfill
+        if live_alerts and weth_amount > 0:
+            await send_telegram_alert(event, cli)
+
         return True
     except Exception as e:
         logger.error(f"process_released_event err: {e}")
@@ -678,17 +793,27 @@ async def onchain_indexer_loop():
                 transfer_logs = await get_outbound_transfers(from_block, to_block, cli)
                 tx_idx = _build_transfer_index(transfer_logs)
 
+                # Only alert on Telegram once we're caught up close to chain tip
+                # (avoids spamming the channel during initial backfill)
+                live_alerts = (tip - to_block) <= TELEGRAM_LIVE_BLOCK_THRESHOLD
+
                 block_ts_cache: Dict[str, int] = {}
                 new_count = 0
+                alerts_sent = 0
                 for log in released_logs:
                     transfers_for_tx = tx_idx.get(log["transactionHash"], [])
-                    if await process_released_event(log, transfers_for_tx, block_ts_cache, cli):
+                    if await process_released_event(
+                        log, transfers_for_tx, block_ts_cache, cli, live_alerts=live_alerts
+                    ):
                         new_count += 1
+                        if live_alerts:
+                            alerts_sent += 1
 
                 if released_logs:
+                    suffix = f" · {alerts_sent} TG alerts" if live_alerts and alerts_sent else ""
                     logger.info(
                         f"blocks {from_block}-{to_block}: {len(released_logs)} released "
-                        f"({len(transfer_logs)} transfers), {new_count} new claims"
+                        f"({len(transfer_logs)} transfers), {new_count} new claims{suffix}"
                     )
                 last_block = to_block
                 await db.indexer_state.update_one(
@@ -793,6 +918,23 @@ async def token_resolver_loop():
 # ============================================================
 # API ROUTES
 # ============================================================
+@api_router.post("/telegram/test")
+async def telegram_test():
+    """Send a sample claim card to the Telegram channel to verify wiring."""
+    if not TELEGRAM_API or not TELEGRAM_CHAT_ID:
+        raise HTTPException(status_code=400, detail="Telegram not configured")
+    # Use the most recent claim with a handle for demo
+    sample = await db.claim_events.find_one(
+        {"claimer_handle": {"$ne": None}, "released_weth_amount": {"$gt": 0}},
+        {"_id": 0}, sort=[("timestamp", -1)],
+    )
+    if not sample:
+        raise HTTPException(status_code=404, detail="no claim events to send yet")
+    async with httpx.AsyncClient() as cli:
+        ok = await send_telegram_alert(sample, cli)
+    return {"sent": ok, "sample_id": sample["id"], "token": sample.get("token_symbol")}
+
+
 @api_router.get("/")
 async def root():
     state = await db.indexer_state.find_one({"_id": "main"})
