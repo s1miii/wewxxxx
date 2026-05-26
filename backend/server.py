@@ -1,15 +1,12 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Query
-from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import asyncio
-import random
 import httpx
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -18,157 +15,67 @@ from datetime import datetime, timezone, timedelta
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-# MongoDB connection
 mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("bankr-monitor")
 
-# Create the main app without a prefix
 app = FastAPI(title="Bankr Bot Claim Fee Monitor")
-
-# Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
 
 # ============================================================
-# MODELS
+# CONFIG
 # ============================================================
+BASE_RPC = os.environ.get("BASE_RPC_URL", "https://base-rpc.publicnode.com")
+BASE_RPC_FALLBACKS = [
+    "https://base-rpc.publicnode.com",
+    "https://1rpc.io/base",
+    "https://base.publicnode.com",
+    "https://mainnet.base.org",
+]
+BANKR_API = "https://api.bankr.bot"
+DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
+
+# Bankr / Doppler StreamableFeesLocker — RELEASED event topic
+# event Released(bytes32 indexed streamId, address indexed beneficiary,
+#                uint256 token0Amount, uint256 token1Amount)
+RELEASED_TOPIC = "0x951cb665214ddfa483febb22b592b0c67f38eac40f7be33f6fcbbe63289276d1"
+# Known Bankr / Doppler StreamableFeesLocker contracts (multiple instances exist).
+# We filter by these + by topic for both performance and to match RPC providers
+# that require an address filter (e.g. publicnode).
+KNOWN_LOCKERS = [
+    "0xbdf938149ac6a781f94faa0ed45e6a0e984c6544",
+    "0xd59ce43e53d69f190e15d9822fb4540dccc91178",  # user-requested
+    "0xa36715da46ddf4a769f3290f49af58bf8132ed8e",
+]
+WETH_BASE = "0x4200000000000000000000000000000000000006"
+POOL_MANAGER = "0x498581ff718922c3f8e6a244956af099b2652b2b"
+ERC20_TRANSFER_TOPIC = (
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+)
+
+POLL_INTERVAL_S = int(os.environ.get("POLL_INTERVAL_S", "15"))
+BLOCKS_PER_QUERY = 4000
+INITIAL_BACKFILL_BLOCKS = int(os.environ.get("INITIAL_BACKFILL_BLOCKS", "20000"))
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class Token(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    address: str
-    symbol: str
-    name: str
-    creator_handle: str  # Twitter / X username
-    creator_avatar: Optional[str] = None
-    chain: str = "base"
-    launched_at: str = Field(default_factory=now_iso)
-    total_claimed_eth: float = 0.0
-    total_claimed_usd: float = 0.0
-    claimable_eth: float = 0.0
-    last_polled: Optional[str] = None
-
-
-class TokenCreate(BaseModel):
-    address: str
-    symbol: Optional[str] = None
-    name: Optional[str] = None
-    creator_handle: Optional[str] = None
-
-
-class ClaimEvent(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    token_address: str
-    token_symbol: str
-    token_name: str
-    claimer_handle: str  # twitter username
-    claimer_avatar: Optional[str] = None
-    claimer_wallet: str
-    amount_eth: float
-    amount_usd: float
-    tx_hash: str
-    block_number: int
-    chain: str = "base"
-    timestamp: str = Field(default_factory=now_iso)
-
-
 # ============================================================
-# SEED DATA (Realistic Bankr/Base ecosystem)
+# ETH PRICE
 # ============================================================
-
-# Known Bankr-style creators on X with realistic avatars
-SEED_CREATORS = [
-    {"handle": "aixbt_agent", "avatar": "https://api.dicebear.com/9.x/identicon/svg?seed=aixbt_agent&backgroundColor=00FF66"},
-    {"handle": "clankeronbase", "avatar": "https://api.dicebear.com/9.x/identicon/svg?seed=clankeronbase&backgroundColor=00F0FF"},
-    {"handle": "bnkrcrypto", "avatar": "https://api.dicebear.com/9.x/identicon/svg?seed=bnkrcrypto&backgroundColor=FFE600"},
-    {"handle": "0xMert_", "avatar": "https://api.dicebear.com/9.x/identicon/svg?seed=0xMert&backgroundColor=FF007A"},
-    {"handle": "basedmemes", "avatar": "https://api.dicebear.com/9.x/identicon/svg?seed=basedmemes&backgroundColor=00FF66"},
-    {"handle": "jessepollak", "avatar": "https://api.dicebear.com/9.x/identicon/svg?seed=jessepollak&backgroundColor=0052FF"},
-    {"handle": "wassielawyer", "avatar": "https://api.dicebear.com/9.x/identicon/svg?seed=wassielawyer&backgroundColor=00F0FF"},
-    {"handle": "tokenterminal", "avatar": "https://api.dicebear.com/9.x/identicon/svg?seed=tokenterminal&backgroundColor=FFE600"},
-    {"handle": "degenspartan", "avatar": "https://api.dicebear.com/9.x/identicon/svg?seed=degenspartan&backgroundColor=FF007A"},
-    {"handle": "saylor_ai", "avatar": "https://api.dicebear.com/9.x/identicon/svg?seed=saylor_ai&backgroundColor=00FF66"},
-    {"handle": "fartcoin_agent", "avatar": "https://api.dicebear.com/9.x/identicon/svg?seed=fartcoin&backgroundColor=FFE600"},
-    {"handle": "vitalik_bot", "avatar": "https://api.dicebear.com/9.x/identicon/svg?seed=vitalik_bot&backgroundColor=00F0FF"},
-    {"handle": "punk6529ai", "avatar": "https://api.dicebear.com/9.x/identicon/svg?seed=punk6529ai&backgroundColor=FF007A"},
-    {"handle": "luca_netz", "avatar": "https://api.dicebear.com/9.x/identicon/svg?seed=luca_netz&backgroundColor=00FF66"},
-    {"handle": "cobie_ai", "avatar": "https://api.dicebear.com/9.x/identicon/svg?seed=cobie_ai&backgroundColor=00F0FF"},
-]
-
-SEED_TOKENS = [
-    {"address": "0x22aF33FE49fD1Fa80c7149773dDe5890D3c76F3b", "symbol": "BNKR", "name": "Bankr",
-     "creator_handle": "bnkrcrypto"},
-    {"address": "0x4f9Fd6Be4a90f2620860d680c0d4d5Fb53d1A825", "symbol": "AIXBT", "name": "aixbt by Virtuals",
-     "creator_handle": "aixbt_agent"},
-    {"address": "0x1bc0c42215582d5A085795f4baDbaC3ff36d1Bcb", "symbol": "CLANKER", "name": "tokenbot",
-     "creator_handle": "clankeronbase"},
-    {"address": "0x768BE13e1680b5ebE0024C42c896E3dB59ec0149", "symbol": "SKI", "name": "Ski Mask Dog",
-     "creator_handle": "basedmemes"},
-    {"address": "0x6921B130D297cc43754afba22e5EAc0FBf8Db75b", "symbol": "DOGINME", "name": "doginme",
-     "creator_handle": "luca_netz"},
-    {"address": "0x9a26F5433671751C3276a065f57e5a02D2817973", "symbol": "KEYCAT", "name": "Keyboard Cat",
-     "creator_handle": "degenspartan"},
-    {"address": "0x3849cC93e7B71b37885237cd91a215974135cA8c", "symbol": "AGENT", "name": "Agent Genesis",
-     "creator_handle": "saylor_ai"},
-    {"address": "0x55cD6469F597452B5A7536e2CD98fDE4c1247ee4", "symbol": "FROG", "name": "Frogman",
-     "creator_handle": "fartcoin_agent"},
-    {"address": "0x06f71FB90f84b35302D132322A3c90E4477333B0", "symbol": "BANK", "name": "Bankr Index",
-     "creator_handle": "tokenterminal"},
-    {"address": "0xb1a03EdA10342529bBF8EB700a06C60441fEf25d", "symbol": "MIGGLES", "name": "Mister Miggles",
-     "creator_handle": "punk6529ai"},
-]
-
-
-def _seed_token_to_doc(t: Dict[str, Any]) -> Dict[str, Any]:
-    creator = next((c for c in SEED_CREATORS if c["handle"] == t["creator_handle"]), SEED_CREATORS[0])
-    return {
-        "id": str(uuid.uuid4()),
-        "address": t["address"].lower(),
-        "symbol": t["symbol"],
-        "name": t["name"],
-        "creator_handle": t["creator_handle"],
-        "creator_avatar": creator["avatar"],
-        "chain": "base",
-        "launched_at": (datetime.now(timezone.utc) - timedelta(days=random.randint(15, 120))).isoformat(),
-        "total_claimed_eth": round(random.uniform(0.5, 80.0), 4),
-        "total_claimed_usd": 0.0,
-        "claimable_eth": round(random.uniform(0.01, 4.0), 4),
-        "last_polled": now_iso(),
-    }
-
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-ETH_PRICE_USD = 3450.0  # baseline (refreshed by poller)
-
-
-def _rand_tx_hash() -> str:
-    return "0x" + "".join(random.choices("abcdef0123456789", k=64))
-
-
-def _rand_wallet() -> str:
-    return "0x" + "".join(random.choices("abcdef0123456789", k=40))
+ETH_PRICE_USD = 3000.0
 
 
 async def fetch_eth_price() -> float:
-    """Fetch real ETH price from CoinGecko (no key required)."""
     global ETH_PRICE_USD
     try:
         async with httpx.AsyncClient(timeout=8.0) as cli:
@@ -176,213 +83,771 @@ async def fetch_eth_price() -> float:
                 "https://api.coingecko.com/api/v3/simple/price",
                 params={"ids": "ethereum", "vs_currencies": "usd"},
             )
-            data = r.json()
-            ETH_PRICE_USD = float(data["ethereum"]["usd"])
-            logger.info(f"ETH price updated: ${ETH_PRICE_USD}")
+            ETH_PRICE_USD = float(r.json()["ethereum"]["usd"])
+            logger.info(f"ETH price = ${ETH_PRICE_USD}")
     except Exception as e:
-        logger.warning(f"Failed to fetch ETH price: {e}")
+        logger.warning(f"ETH price fetch failed: {e}")
     return ETH_PRICE_USD
 
 
-async def fetch_bankr_fees(token_address: str) -> Optional[Dict[str, Any]]:
-    """Public Bankr token fees endpoint (unauthenticated)."""
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as cli:
-            r = await cli.get(
-                f"https://api.bankr.bot/token-launches/{token_address}/fees",
-                params={"days": 30},
+# ============================================================
+# RPC HELPERS
+# ============================================================
+_rpc_idx = 0
+
+
+async def rpc(method: str, params: list, cli: httpx.AsyncClient, retries: int = 3) -> Any:
+    """RPC with rotating endpoint fallback + exponential backoff on 429."""
+    global _rpc_idx
+    last_err = None
+    for attempt in range(retries):
+        url = BASE_RPC_FALLBACKS[_rpc_idx % len(BASE_RPC_FALLBACKS)]
+        try:
+            r = await cli.post(
+                url,
+                json={"jsonrpc": "2.0", "method": method, "params": params, "id": 1},
+                timeout=20.0,
             )
-            if r.status_code == 200:
-                return r.json()
+            if r.status_code == 429:
+                _rpc_idx += 1
+                await asyncio.sleep(0.4 * (attempt + 1))
+                continue
+            d = r.json()
+            if "error" in d:
+                msg = str(d["error"]).lower()
+                if "rate" in msg or "limit" in msg:
+                    _rpc_idx += 1
+                    await asyncio.sleep(0.4 * (attempt + 1))
+                    continue
+                raise RuntimeError(f"RPC error: {d['error']}")
+            return d["result"]
+        except (httpx.HTTPError, httpx.ConnectError, asyncio.TimeoutError) as e:
+            last_err = e
+            _rpc_idx += 1
+            await asyncio.sleep(0.3 * (attempt + 1))
+            continue
+    raise RuntimeError(f"RPC failed after {retries} retries: {last_err}")
+
+
+async def get_block_number(cli: httpx.AsyncClient) -> int:
+    return int(await rpc("eth_blockNumber", [], cli), 16)
+
+
+async def get_block_timestamp(block_hex: str, cli: httpx.AsyncClient) -> int:
+    blk = await rpc("eth_getBlockByNumber", [block_hex, False], cli)
+    return int(blk["timestamp"], 16)
+
+
+async def get_logs_by_topic(from_block: int, to_block: int, topic0: str,
+                            cli: httpx.AsyncClient) -> List[Dict]:
+    return await rpc(
+        "eth_getLogs",
+        [{
+            "address": KNOWN_LOCKERS,
+            "fromBlock": hex(from_block),
+            "toBlock": hex(to_block),
+            "topics": [topic0],
+        }],
+        cli,
+    )
+
+
+async def get_tx_receipt(tx_hash: str, cli: httpx.AsyncClient) -> Dict[str, Any]:
+    return await rpc("eth_getTransactionReceipt", [tx_hash], cli)
+
+
+def _hex_to_string(h: str) -> str:
+    if not h:
+        return ""
+    h = h.replace("0x", "")
+    if len(h) < 128:
+        try:
+            return bytes.fromhex(h).rstrip(b"\x00").decode("utf-8", errors="ignore")
+        except Exception:
+            return ""
+    try:
+        length = int(h[64:128], 16)
+        data = h[128:128 + length * 2]
+        return bytes.fromhex(data).decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+SEL_SYMBOL = "0x95d89b41"
+SEL_NAME = "0x06fdde03"
+SEL_DECIMALS = "0x313ce567"
+
+
+async def fetch_token_meta_onchain(addr: str, cli: httpx.AsyncClient) -> Dict[str, Any]:
+    try:
+        sym_raw = await rpc("eth_call", [{"to": addr, "data": SEL_SYMBOL}, "latest"], cli)
+        name_raw = await rpc("eth_call", [{"to": addr, "data": SEL_NAME}, "latest"], cli)
+        dec_raw = await rpc("eth_call", [{"to": addr, "data": SEL_DECIMALS}, "latest"], cli)
+        decimals = int(dec_raw, 16) if dec_raw and dec_raw != "0x" else 18
+        return {
+            "address": addr.lower(),
+            "symbol": _hex_to_string(sym_raw) or "TOK",
+            "name": _hex_to_string(name_raw) or "Unknown",
+            "decimals": decimals,
+        }
     except Exception as e:
-        logger.debug(f"Bankr API miss for {token_address}: {e}")
+        logger.debug(f"on-chain meta fail {addr}: {e}")
+        return {"address": addr.lower(), "symbol": "TOK", "name": "Unknown", "decimals": 18}
+
+
+# ============================================================
+# BANKR LAUNCHES REGISTRY
+# ============================================================
+async def sync_bankr_launches(cli: httpx.AsyncClient, max_pages: int = 100):
+    upserted = 0
+    page = 0
+    consecutive_failures = 0
+    while page < max_pages:
+        try:
+            r = await cli.get(
+                f"{BANKR_API}/token-launches",
+                params={"limit": 50, "offset": page * 50},
+                timeout=10.0,
+            )
+            if r.status_code == 429 or r.status_code == 503:
+                consecutive_failures += 1
+                if consecutive_failures > 6:
+                    logger.warning(f"launches sync: 6+ rate-limit failures, stopping at page {page}")
+                    break
+                await asyncio.sleep(5.0 * consecutive_failures)
+                continue
+            if r.status_code != 200:
+                consecutive_failures += 1
+                if consecutive_failures > 3:
+                    break
+                await asyncio.sleep(2.0)
+                continue
+            consecutive_failures = 0
+            launches = (r.json() or {}).get("launches", [])
+            if not launches:
+                break
+            for L in launches:
+                addr = (L.get("tokenAddress") or "").lower()
+                if not addr:
+                    continue
+                for k in ("deployer", "feeRecipient"):
+                    if isinstance(L.get(k), dict) and L[k].get("walletAddress"):
+                        L[k]["walletAddress"] = L[k]["walletAddress"].lower()
+                L["tokenAddress"] = addr
+                await db.bankr_launches.update_one(
+                    {"tokenAddress": addr}, {"$set": L}, upsert=True
+                )
+                upserted += 1
+            if len(launches) < 50:
+                break
+            page += 1
+            await asyncio.sleep(0.8)  # be polite — Bankr API is sensitive
+        except Exception as e:
+            logger.warning(f"launches sync page {page} failed: {e}")
+            consecutive_failures += 1
+            if consecutive_failures > 3:
+                break
+            await asyncio.sleep(2.0)
+    if upserted:
+        logger.info(f"bankr launches synced: {upserted} records (pages 0..{page})")
+    return upserted
+
+
+async def launches_syncer_loop():
+    async with httpx.AsyncClient() as cli:
+        await sync_bankr_launches(cli, max_pages=300)
+        while True:
+            await asyncio.sleep(180)
+            try:
+                await sync_bankr_launches(cli, max_pages=20)
+            except Exception as e:
+                logger.warning(f"launches sync error: {e}")
+
+
+async def lookup_bankr_creator(token_addr: str) -> Dict[str, Any]:
+    """Returns dict with handle, avatar, wallet, tweet_url if known."""
+    doc = await db.bankr_launches.find_one(
+        {"tokenAddress": token_addr.lower()}, {"_id": 0}
+    )
+    if not doc:
+        return {}
+    rec = doc.get("feeRecipient") or doc.get("deployer") or {}
+    # if feeRecipient has no xUsername but deployer does, use deployer's
+    if not rec.get("xUsername") and isinstance(doc.get("deployer"), dict):
+        if doc["deployer"].get("xUsername"):
+            rec = doc["deployer"]
+    return {
+        "handle": rec.get("xUsername"),
+        "avatar": rec.get("xProfileImageUrl"),
+        "wallet": rec.get("walletAddress"),
+        "tweet_url": doc.get("tweetUrl"),
+        "symbol_from_registry": doc.get("tokenSymbol"),
+        "name_from_registry": doc.get("tokenName"),
+    }
+
+
+async def fetch_bankr_token_creator_live(token_addr: str, cli: httpx.AsyncClient) -> Dict[str, Any]:
+    """Fallback: call /public/doppler/token-fees/{token} to get creator info
+    even for tokens not in our /token-launches registry."""
+    try:
+        r = await cli.get(
+            f"{BANKR_API}/public/doppler/token-fees/{token_addr}",
+            params={"days": 1}, timeout=8.0,
+        )
+        if r.status_code != 200:
+            return {}
+        body = r.json() or {}
+        # The endpoint response wraps a `tokens` array — find our token
+        for t in body.get("tokens", []):
+            if (t.get("tokenAddress") or "").lower() == token_addr.lower():
+                creator = t.get("creator") or body.get("creator") or {}
+                handle = creator.get("xUsername") or creator.get("username")
+                if not handle:
+                    return {
+                        "symbol_from_registry": t.get("symbol"),
+                        "name_from_registry": t.get("name"),
+                    }
+                return {
+                    "handle": handle,
+                    "avatar": creator.get("xProfileImageUrl")
+                              or f"https://unavatar.io/x/{handle}",
+                    "wallet": creator.get("walletAddress"),
+                    "symbol_from_registry": t.get("symbol"),
+                    "name_from_registry": t.get("name"),
+                }
+    except Exception as e:
+        logger.debug(f"live bankr creator lookup fail {token_addr}: {e}")
+    return {}
+
+
+# ============================================================
+# DEXSCREENER (market cap, liquidity, FDV)
+# ============================================================
+async def fetch_dexscreener(token_addr: str, cli: httpx.AsyncClient) -> Dict[str, Any]:
+    try:
+        r = await cli.get(f"{DEXSCREENER_API}/{token_addr}", timeout=8.0)
+        if r.status_code != 200:
+            return {}
+        body = r.json() or {}
+        pairs = body.get("pairs") or []
+        if not pairs:
+            return {}
+        # pick the highest liquidity pair
+        pairs.sort(key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0), reverse=True)
+        top = pairs[0]
+        liq = top.get("liquidity") or {}
+        return {
+            "market_cap_usd": float(top.get("marketCap") or 0),
+            "fdv_usd": float(top.get("fdv") or 0),
+            "liquidity_usd": float(liq.get("usd") or 0),
+            "price_usd": float(top.get("priceUsd") or 0),
+            "dex": top.get("dexId"),
+            "pair_address": top.get("pairAddress"),
+            "url": top.get("url"),
+        }
+    except Exception as e:
+        logger.debug(f"dexscreener fail {token_addr}: {e}")
+        return {}
+
+
+# ============================================================
+# CORE — process Released events
+# ============================================================
+async def rpc_unfiltered(method: str, params: list, cli: httpx.AsyncClient,
+                          retries: int = 3) -> Any:
+    """Like rpc() but pinned to mainnet.base.org which allows queries without
+    address filter. Used only for the limited Transfer log queries."""
+    url = "https://mainnet.base.org"
+    last_err = None
+    for attempt in range(retries):
+        try:
+            r = await cli.post(
+                url,
+                json={"jsonrpc": "2.0", "method": method, "params": params, "id": 1},
+                timeout=20.0,
+            )
+            if r.status_code == 429:
+                await asyncio.sleep(1.0 * (attempt + 1))
+                continue
+            d = r.json()
+            if "error" in d:
+                msg = str(d["error"]).lower()
+                if "rate" in msg or "limit" in msg:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+                    continue
+                raise RuntimeError(f"RPC error: {d['error']}")
+            return d["result"]
+        except (httpx.HTTPError, httpx.ConnectError, asyncio.TimeoutError) as e:
+            last_err = e
+            await asyncio.sleep(0.5 * (attempt + 1))
+            continue
+    raise RuntimeError(f"unfiltered RPC failed: {last_err}")
+
+
+async def get_outbound_transfers(from_block: int, to_block: int,
+                                  cli: httpx.AsyncClient) -> List[Dict]:
+    """Fetch all ERC20 Transfer events with from = known locker contracts.
+    Uses unfiltered RPC because we don't know which token contract emitted."""
+    out = []
+    for locker in KNOWN_LOCKERS:
+        padded_from = "0x" + "0" * 24 + locker[2:]
+        try:
+            logs = await rpc_unfiltered(
+                "eth_getLogs",
+                [{
+                    "fromBlock": hex(from_block),
+                    "toBlock": hex(to_block),
+                    "topics": [ERC20_TRANSFER_TOPIC, padded_from],
+                }],
+                cli,
+            )
+            out.extend(logs)
+            await asyncio.sleep(0.2)
+        except Exception as e:
+            logger.debug(f"transfer logs fail for {locker}: {e}")
+    return out
+
+
+def _build_transfer_index(transfers: List[Dict]) -> Dict[str, List[Dict]]:
+    """Index Transfer logs by (tx_hash) for fast lookup."""
+    idx: Dict[str, List[Dict]] = {}
+    for log in transfers:
+        idx.setdefault(log["transactionHash"], []).append(log)
+    return idx
+
+
+def find_token_from_transfers(tx_transfers: List[Dict], locker: str,
+                               beneficiary: str) -> Optional[Dict[str, Any]]:
+    """Within a single tx's Transfer logs, find the launched token (non-WETH transfer
+    from locker to beneficiary)."""
+    locker_l = locker.lower()
+    benef_l = beneficiary.lower()
+    for log in tx_transfers:
+        frm = "0x" + log["topics"][1][-40:].lower()
+        to = "0x" + log["topics"][2][-40:].lower()
+        tok = log["address"].lower()
+        if frm == locker_l and to == benef_l and tok != WETH_BASE.lower():
+            return {"token_address": tok, "log": log}
     return None
 
 
-async def seed_database():
-    """Seed tokens + initial claim events if collection is empty."""
-    tokens_count = await db.tokens.count_documents({})
-    if tokens_count == 0:
-        docs = [_seed_token_to_doc(t) for t in SEED_TOKENS]
-        for d in docs:
-            d["total_claimed_usd"] = round(d["total_claimed_eth"] * ETH_PRICE_USD, 2)
-        await db.tokens.insert_many(docs)
-        logger.info(f"Seeded {len(docs)} tokens")
+async def process_released_event(
+    log: Dict[str, Any],
+    tx_transfers: List[Dict[str, Any]],
+    block_ts_cache: Dict[str, int],
+    cli: httpx.AsyncClient,
+) -> bool:
+    """Returns True if a new claim event was inserted."""
+    try:
+        tx_hash = log["transactionHash"]
+        log_index = int(log["logIndex"], 16)
+        block_number = int(log["blockNumber"], 16)
+        locker = log["address"].lower()
+        pool_id = log["topics"][1]
+        beneficiary = "0x" + log["topics"][2][-40:].lower()
+        data = log["data"].replace("0x", "")
+        amt0_raw = int(data[0:64], 16) if len(data) >= 64 else 0
+        amt1_raw = int(data[64:128], 16) if len(data) >= 128 else 0
 
-    events_count = await db.claim_events.count_documents({})
-    if events_count == 0:
-        tokens = await db.tokens.find({}, {"_id": 0}).to_list(100)
-        events = []
-        now = datetime.now(timezone.utc)
-        for _ in range(120):
-            tok = random.choice(tokens)
-            claimer = random.choice(SEED_CREATORS)
-            amt_eth = round(random.uniform(0.005, 2.8), 5)
-            ts = now - timedelta(minutes=random.randint(2, 60 * 24 * 21))
-            events.append({
-                "id": str(uuid.uuid4()),
-                "token_address": tok["address"],
-                "token_symbol": tok["symbol"],
-                "token_name": tok["name"],
-                "claimer_handle": claimer["handle"],
-                "claimer_avatar": claimer["avatar"],
-                "claimer_wallet": _rand_wallet(),
-                "amount_eth": amt_eth,
-                "amount_usd": round(amt_eth * ETH_PRICE_USD, 2),
-                "tx_hash": _rand_tx_hash(),
-                "block_number": random.randint(20_000_000, 22_500_000),
-                "chain": "base",
-                "timestamp": ts.isoformat(),
-            })
-        await db.claim_events.insert_many(events)
-        logger.info(f"Seeded {len(events)} historical claim events")
+        if amt0_raw == 0 and amt1_raw == 0:
+            return False
+
+        key = f"{tx_hash}-{log_index}"
+        if await db.claim_events.find_one({"key": key}, {"_id": 1}):
+            return False
+
+        # Find token via pre-fetched Transfer logs
+        token_info = find_token_from_transfers(tx_transfers, locker, beneficiary)
+        token_addr = token_info["token_address"] if token_info else None
+
+        # Determine which amount is WETH and which is the token.
+        # Bankr convention: token0 = the address with LOWER hex value (per Uniswap V4)
+        # WETH on Base = 0x4200000000000000000000000000000000000006
+        token_amount_raw = amt0_raw
+        weth_amount_raw = amt1_raw
+        if token_addr:
+            if int(token_addr, 16) > int(WETH_BASE, 16):
+                token_amount_raw, weth_amount_raw = amt1_raw, amt0_raw
+        else:
+            # token_address couldn't be resolved from inner Transfer logs.
+            # Use a magnitude-based heuristic — WETH amounts realistically cap at
+            # ~1000 ETH = 10^21 wei. Anything larger MUST be the launched token.
+            WETH_CAP_RAW = 10 ** 21
+            if amt0_raw > WETH_CAP_RAW and amt1_raw <= WETH_CAP_RAW:
+                token_amount_raw, weth_amount_raw = amt0_raw, amt1_raw
+            elif amt1_raw > WETH_CAP_RAW and amt0_raw <= WETH_CAP_RAW:
+                token_amount_raw, weth_amount_raw = amt1_raw, amt0_raw
+            elif amt0_raw == 0:
+                # only one leg has value — assume WETH if it's reasonable, else token
+                if amt1_raw <= WETH_CAP_RAW:
+                    weth_amount_raw, token_amount_raw = amt1_raw, 0
+                else:
+                    weth_amount_raw, token_amount_raw = 0, amt1_raw
+            elif amt1_raw == 0:
+                if amt0_raw <= WETH_CAP_RAW:
+                    weth_amount_raw, token_amount_raw = amt0_raw, 0
+                else:
+                    weth_amount_raw, token_amount_raw = 0, amt0_raw
+            else:
+                # both moderate — assume token0=token, token1=WETH
+                token_amount_raw, weth_amount_raw = amt0_raw, amt1_raw
+
+        weth_amount = weth_amount_raw / 1e18
+
+        # Token meta — registry first, then on-chain
+        token_symbol = "?"
+        token_name = "?"
+        token_decimals = 18
+        if token_addr:
+            tok_doc = await db.tokens.find_one({"address": token_addr}, {"_id": 0})
+            if tok_doc and tok_doc.get("symbol") and tok_doc["symbol"] not in ("TOK", "?"):
+                token_symbol = tok_doc["symbol"]
+                token_name = tok_doc.get("name", "")
+                token_decimals = int(tok_doc.get("decimals", 18))
+            else:
+                bcr = await lookup_bankr_creator(token_addr)
+                if bcr.get("symbol_from_registry"):
+                    token_symbol = bcr["symbol_from_registry"]
+                    token_name = bcr.get("name_from_registry", "")
+                else:
+                    meta = await fetch_token_meta_onchain(token_addr, cli)
+                    token_symbol = meta["symbol"]
+                    token_name = meta["name"]
+                    token_decimals = meta["decimals"]
+
+        token_amount = token_amount_raw / (10 ** token_decimals) if token_addr else 0
+
+        creator = await lookup_bankr_creator(token_addr) if token_addr else {}
+        claimer_handle = creator.get("handle")
+        claimer_avatar = creator.get("avatar")
+
+        # Block timestamp from cache
+        ts = block_ts_cache.get(log["blockNumber"])
+        if ts is None:
+            try:
+                ts = await get_block_timestamp(log["blockNumber"], cli)
+                block_ts_cache[log["blockNumber"]] = ts
+            except Exception:
+                ts = int(datetime.now(timezone.utc).timestamp())
+        timestamp = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+        # DexScreener market data (skip if already cached for this token in the last hour)
+        market_cap_usd = 0
+        liquidity_usd = 0
+        price_usd = 0
+        if token_addr:
+            cached = await db.tokens.find_one(
+                {"address": token_addr}, {"market_cap_usd": 1, "liquidity_usd": 1, "price_usd": 1, "last_polled": 1}
+            )
+            fresh_enough = False
+            if cached and cached.get("last_polled"):
+                try:
+                    age = (datetime.now(timezone.utc) -
+                           datetime.fromisoformat(cached["last_polled"])).total_seconds()
+                    fresh_enough = age < 3600
+                except Exception:
+                    pass
+            if fresh_enough and cached:
+                market_cap_usd = cached.get("market_cap_usd") or 0
+                liquidity_usd = cached.get("liquidity_usd") or 0
+                price_usd = cached.get("price_usd") or 0
+            else:
+                ds = await fetch_dexscreener(token_addr, cli)
+                market_cap_usd = ds.get("market_cap_usd") or ds.get("fdv_usd") or 0
+                liquidity_usd = ds.get("liquidity_usd", 0)
+                price_usd = ds.get("price_usd", 0)
+
+        amount_usd = round(weth_amount * ETH_PRICE_USD, 2)
+
+        event = {
+            "id": str(uuid.uuid4()),
+            "key": key,
+            "tx_hash": tx_hash,
+            "block_number": block_number,
+            "log_index": log_index,
+            "locker_contract": locker,
+            "pool_id": pool_id,
+            "token_address": token_addr,
+            "token_symbol": token_symbol,
+            "token_name": token_name,
+            "token_decimals": token_decimals,
+            "beneficiary": beneficiary,
+            "claimer_wallet": beneficiary,
+            "claimer_handle": claimer_handle,
+            "claimer_avatar": claimer_avatar
+                or (f"https://unavatar.io/x/{claimer_handle}" if claimer_handle
+                    else f"https://api.dicebear.com/9.x/identicon/svg?seed={beneficiary}&backgroundColor=00FF66"),
+            "released_token_amount": token_amount,
+            "released_weth_amount": weth_amount,
+            "released_usd": amount_usd,
+            "amount_eth": weth_amount,
+            "amount_token": token_amount,
+            "amount_usd": amount_usd,
+            "market_cap_usd": market_cap_usd,
+            "liquidity_usd": liquidity_usd,
+            "price_usd": price_usd,
+            "chain": "base",
+            "source": "onchain_released",
+            "tweet_url": creator.get("tweet_url"),
+            "timestamp": timestamp,
+        }
+        await db.claim_events.insert_one(event)
+
+        if token_addr:
+            await db.tokens.update_one(
+                {"address": token_addr},
+                {
+                    "$set": {
+                        "address": token_addr,
+                        "symbol": token_symbol,
+                        "name": token_name,
+                        "decimals": token_decimals,
+                        "chain": "base",
+                        "creator_handle": claimer_handle,
+                        "creator_avatar": event["claimer_avatar"],
+                        "creator_wallet": creator.get("wallet"),
+                        "tweet_url": creator.get("tweet_url"),
+                        "market_cap_usd": market_cap_usd,
+                        "liquidity_usd": liquidity_usd,
+                        "price_usd": price_usd,
+                        "last_polled": now_iso(),
+                        "last_claim": timestamp,
+                    },
+                    "$setOnInsert": {
+                        "id": str(uuid.uuid4()),
+                        "first_seen": now_iso(),
+                    },
+                    "$inc": {
+                        "total_claimed_eth": weth_amount,
+                        "total_claimed_usd": amount_usd,
+                        "total_claimed_token": token_amount,
+                        "total_claim_count": 1,
+                    },
+                },
+                upsert=True,
+            )
+
+        logger.info(
+            f"NEW CLAIM: @{claimer_handle or '???'} got "
+            f"{token_amount:.4f} ${token_symbol} + {weth_amount:.6f} ETH "
+            f"(MC ${market_cap_usd:,.0f}) tx={tx_hash[:12]}"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"process_released_event err: {e}")
+        return False
 
 
-async def generate_live_event() -> Optional[Dict[str, Any]]:
-    """Generate a realistic new claim event (combination of polled + simulated)."""
-    tokens = await db.tokens.find({}, {"_id": 0}).to_list(200)
-    if not tokens:
-        return None
-    tok = random.choice(tokens)
+async def onchain_indexer_loop():
+    logger.info("On-chain Released event indexer started")
+    async with httpx.AsyncClient() as cli:
+        state = await db.indexer_state.find_one({"_id": "main"})
+        if state and state.get("last_block"):
+            last_block = int(state["last_block"])
+        else:
+            tip = await get_block_number(cli)
+            last_block = max(0, tip - INITIAL_BACKFILL_BLOCKS)
+            logger.info(f"first run: backfilling from block {last_block}")
 
-    # 30% chance: try to use real Bankr API data shape
-    real = None
-    if random.random() < 0.3:
-        real = await fetch_bankr_fees(tok["address"])
+        while True:
+            try:
+                tip = await get_block_number(cli)
+                if last_block >= tip:
+                    await asyncio.sleep(POLL_INTERVAL_S)
+                    continue
+                from_block = last_block + 1
+                to_block = min(tip, from_block + BLOCKS_PER_QUERY - 1)
 
-    claimer = random.choice(SEED_CREATORS)
-    if random.random() < 0.6:
-        # creator claims their own fees most often
-        claimer = next((c for c in SEED_CREATORS if c["handle"] == tok["creator_handle"]), claimer)
+                # Fetch Released events AND outbound Transfer events in parallel
+                released_logs = await get_logs_by_topic(from_block, to_block, RELEASED_TOPIC, cli)
+                transfer_logs = await get_outbound_transfers(from_block, to_block, cli)
+                tx_idx = _build_transfer_index(transfer_logs)
 
-    if real and isinstance(real, dict):
-        try:
-            claimable = float(real.get("claimable", {}).get("eth", random.uniform(0.01, 1.5)))
-            amt_eth = max(0.001, claimable * random.uniform(0.4, 1.0))
-        except Exception:
-            amt_eth = round(random.uniform(0.005, 1.8), 5)
-    else:
-        amt_eth = round(random.uniform(0.005, 1.8), 5)
+                block_ts_cache: Dict[str, int] = {}
+                new_count = 0
+                for log in released_logs:
+                    transfers_for_tx = tx_idx.get(log["transactionHash"], [])
+                    if await process_released_event(log, transfers_for_tx, block_ts_cache, cli):
+                        new_count += 1
 
-    event = {
-        "id": str(uuid.uuid4()),
-        "token_address": tok["address"],
-        "token_symbol": tok["symbol"],
-        "token_name": tok["name"],
-        "claimer_handle": claimer["handle"],
-        "claimer_avatar": claimer["avatar"],
-        "claimer_wallet": _rand_wallet(),
-        "amount_eth": round(amt_eth, 5),
-        "amount_usd": round(amt_eth * ETH_PRICE_USD, 2),
-        "tx_hash": _rand_tx_hash(),
-        "block_number": random.randint(22_400_000, 22_600_000),
-        "chain": "base",
-        "timestamp": now_iso(),
-    }
-
-    # increase token totals
-    await db.tokens.update_one(
-        {"address": tok["address"]},
-        {
-            "$inc": {
-                "total_claimed_eth": event["amount_eth"],
-                "total_claimed_usd": event["amount_usd"],
-            },
-            "$set": {"last_polled": now_iso()},
-        },
-    )
-    await db.claim_events.insert_one(event)
-    return event
-
-
-# ============================================================
-# BACKGROUND POLLER
-# ============================================================
-
-_poller_task: Optional[asyncio.Task] = None
+                if released_logs:
+                    logger.info(
+                        f"blocks {from_block}-{to_block}: {len(released_logs)} released "
+                        f"({len(transfer_logs)} transfers), {new_count} new claims"
+                    )
+                last_block = to_block
+                await db.indexer_state.update_one(
+                    {"_id": "main"},
+                    {"$set": {"last_block": last_block, "updated_at": now_iso(), "version": 4}},
+                    upsert=True,
+                )
+                if last_block >= tip - 5:
+                    await asyncio.sleep(POLL_INTERVAL_S)
+                else:
+                    await asyncio.sleep(0.5)
+            except Exception as e:
+                msg = str(e).lower()
+                if "rate" in msg or "limit" in msg:
+                    logger.warning(f"RPC rate-limit, backing off: {e}")
+                    await asyncio.sleep(15)
+                else:
+                    logger.error(f"indexer loop err: {e}")
+                    await asyncio.sleep(POLL_INTERVAL_S)
 
 
-async def background_poller():
-    """Periodically simulate new claim events + refresh ETH price."""
-    logger.info("Background poller started")
-    tick = 0
+async def price_refresher_loop():
     while True:
-        try:
-            if tick % 20 == 0:
-                await fetch_eth_price()
-            # 1-3 new events per cycle
-            for _ in range(random.randint(1, 3)):
-                ev = await generate_live_event()
-                if ev:
-                    logger.info(f"New claim: @{ev['claimer_handle']} claimed {ev['amount_eth']} ETH from ${ev['token_symbol']}")
-            tick += 1
-        except Exception as e:
-            logger.error(f"Poller error: {e}")
-        await asyncio.sleep(15)
+        await asyncio.sleep(300)
+        await fetch_eth_price()
+
+
+async def token_resolver_loop():
+    """Background task: re-resolve tokens that still show '?' or 'TOK' symbols.
+    Tries Bankr registry first (might have been synced more), then on-chain."""
+    await asyncio.sleep(45)  # let initial indexing settle
+    async with httpx.AsyncClient() as cli:
+        while True:
+            try:
+                cur = db.tokens.find(
+                    {"$or": [
+                        {"symbol": {"$in": ["?", "TOK", "Unknown", None]}},
+                        {"creator_handle": {"$in": [None, ""]}},
+                    ]},
+                    {"_id": 0, "address": 1, "symbol": 1, "creator_handle": 1},
+                ).limit(30)
+                tokens_to_fix = await cur.to_list(30)
+                fixed = 0
+                for t in tokens_to_fix:
+                    addr = t["address"]
+                    new_sym = None
+                    new_name = None
+                    handle = None
+                    avatar = None
+                    bcr = await lookup_bankr_creator(addr)
+                    if bcr.get("symbol_from_registry"):
+                        new_sym = bcr["symbol_from_registry"]
+                        new_name = bcr.get("name_from_registry")
+                        handle = bcr.get("handle")
+                        avatar = bcr.get("avatar")
+                    else:
+                        # try Bankr live token-fees endpoint
+                        live = await fetch_bankr_token_creator_live(addr, cli)
+                        if live.get("symbol_from_registry"):
+                            new_sym = live["symbol_from_registry"]
+                            new_name = live.get("name_from_registry")
+                        if live.get("handle"):
+                            handle = live["handle"]
+                            avatar = live.get("avatar")
+                        if not new_sym:
+                            meta = await fetch_token_meta_onchain(addr, cli)
+                            if meta["symbol"] not in ("TOK", "?", "Unknown"):
+                                new_sym = meta["symbol"]
+                                new_name = meta["name"]
+                    if new_sym or handle:
+                        token_set: Dict[str, Any] = {}
+                        if new_sym:
+                            token_set["symbol"] = new_sym
+                            token_set["name"] = new_name or "Unknown"
+                        if handle:
+                            token_set["creator_handle"] = handle
+                            token_set["creator_avatar"] = avatar or f"https://unavatar.io/x/{handle}"
+                        await db.tokens.update_one({"address": addr}, {"$set": token_set})
+                        # propagate to existing claim events
+                        evt_set: Dict[str, Any] = {}
+                        if new_sym:
+                            evt_set["token_symbol"] = new_sym
+                            evt_set["token_name"] = new_name or "Unknown"
+                        if handle:
+                            evt_set["claimer_handle"] = handle
+                            evt_set["claimer_avatar"] = avatar or f"https://unavatar.io/x/{handle}"
+                        if evt_set:
+                            await db.claim_events.update_many(
+                                {"token_address": addr}, {"$set": evt_set}
+                            )
+                        fixed += 1
+                    await asyncio.sleep(0.8)
+                if fixed:
+                    logger.info(f"token_resolver: fixed {fixed} tokens")
+            except Exception as e:
+                logger.warning(f"token_resolver error: {e}")
+            await asyncio.sleep(30)
 
 
 # ============================================================
-# ROUTES
+# API ROUTES
 # ============================================================
-
-
 @api_router.get("/")
 async def root():
-    return {"service": "bankr-bot-claim-monitor", "version": "1.0.0", "chain": "base"}
+    state = await db.indexer_state.find_one({"_id": "main"})
+    return {
+        "service": "bankr-bot-claim-monitor",
+        "version": "4.0.0",
+        "chain": "base",
+        "event_topic": RELEASED_TOPIC,
+        "indexer_last_block": (state or {}).get("last_block"),
+        "data_source": "on-chain Released events + bankr public API + dexscreener",
+    }
 
 
 @api_router.get("/stats")
-async def get_stats():
-    """Aggregate KPIs."""
+async def stats():
     total_events = await db.claim_events.count_documents({})
-
-    pipeline_total = [
+    agg = await db.claim_events.aggregate([
         {"$group": {"_id": None,
                     "total_eth": {"$sum": "$amount_eth"},
                     "total_usd": {"$sum": "$amount_usd"}}}
-    ]
-    agg = await db.claim_events.aggregate(pipeline_total).to_list(1)
+    ]).to_list(1)
     total_eth = float(agg[0]["total_eth"]) if agg else 0.0
     total_usd = float(agg[0]["total_usd"]) if agg else 0.0
 
-    # 24h claims
     since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
     last_24h = await db.claim_events.count_documents({"timestamp": {"$gte": since}})
-
-    pipeline_24h = [
+    agg24 = await db.claim_events.aggregate([
         {"$match": {"timestamp": {"$gte": since}}},
         {"$group": {"_id": None,
                     "eth": {"$sum": "$amount_eth"},
                     "usd": {"$sum": "$amount_usd"}}}
-    ]
-    agg24 = await db.claim_events.aggregate(pipeline_24h).to_list(1)
+    ]).to_list(1)
     eth_24h = float(agg24[0]["eth"]) if agg24 else 0.0
     usd_24h = float(agg24[0]["usd"]) if agg24 else 0.0
 
-    unique_claimers = len(await db.claim_events.distinct("claimer_handle"))
+    unique_wallets = len(
+        await db.claim_events.distinct("beneficiary", {"beneficiary": {"$ne": ""}})
+    )
+    unique_handles = len(
+        await db.claim_events.distinct("claimer_handle", {"claimer_handle": {"$ne": None}})
+    )
+    bankr_launches = await db.bankr_launches.count_documents({})
     tracked_tokens = await db.tokens.count_documents({})
+    state = await db.indexer_state.find_one({"_id": "main"})
 
     return {
         "total_claims": total_events,
-        "total_eth": round(total_eth, 4),
+        "total_eth": round(total_eth, 6),
         "total_usd": round(total_usd, 2),
         "claims_24h": last_24h,
-        "eth_24h": round(eth_24h, 4),
+        "eth_24h": round(eth_24h, 6),
         "usd_24h": round(usd_24h, 2),
-        "unique_claimers": unique_claimers,
+        "unique_claimers": unique_wallets,
+        "unique_handles": unique_handles,
+        "lifetime_eth": round(total_eth, 4),
+        "lifetime_usd": round(total_usd, 2),
+        "lifetime_claim_count": total_events,
+        "bankr_launches_indexed": bankr_launches,
         "tracked_tokens": tracked_tokens,
         "eth_price_usd": round(ETH_PRICE_USD, 2),
+        "indexer_last_block": (state or {}).get("last_block"),
+        "event_topic": RELEASED_TOPIC,
     }
 
 
 @api_router.get("/claims/feed")
 async def claims_feed(
-    limit: int = Query(30, ge=1, le=100),
+    limit: int = Query(40, ge=1, le=200),
     skip: int = Query(0, ge=0),
     handle: Optional[str] = None,
     token: Optional[str] = None,
 ):
-    """Paginated newest-first feed."""
     query: Dict[str, Any] = {}
     if handle:
         query["claimer_handle"] = {"$regex": f"^{handle}", "$options": "i"}
@@ -391,17 +856,49 @@ async def claims_feed(
             {"token_symbol": {"$regex": token, "$options": "i"}},
             {"token_address": token.lower()},
         ]
-    cur = db.claim_events.find(query, {"_id": 0}).sort("timestamp", -1).skip(skip).limit(limit)
+    cur = (
+        db.claim_events.find(query, {"_id": 0})
+        .sort("timestamp", -1)
+        .skip(skip)
+        .limit(limit)
+    )
     items = await cur.to_list(limit)
     return {"items": items, "count": len(items)}
 
 
+@api_router.get("/claims/{event_id}/card")
+async def claim_card(event_id: str):
+    """Returns the formatted claim card text — Telegram/Discord-friendly."""
+    e = await db.claim_events.find_one({"id": event_id}, {"_id": 0})
+    if not e:
+        raise HTTPException(status_code=404, detail="event not found")
+    handle = e.get("claimer_handle")
+    handle_line = f"@{handle} ({e['beneficiary'][:6]}…{e['beneficiary'][-4:]})" if handle else e["beneficiary"]
+    lines = [
+        "🎉 NEW BANKR FEE CLAIMED!",
+        "",
+        "Token Information:",
+        f"• Name: {e.get('token_name','?')}",
+        f"• Symbol: ${e.get('token_symbol','?')}",
+        f"• Contract: {e.get('token_address')}",
+        f"• Market Cap: ${e.get('market_cap_usd',0):,.2f}",
+        f"• Liquidity: ${e.get('liquidity_usd',0):,.2f}",
+        "",
+        "Released to Beneficiary:",
+        f"• Token Amount: {e.get('released_token_amount',0):.4f} {e.get('token_symbol','')}",
+        f"• ETH Amount: {e.get('released_weth_amount',0):.6f} ETH (${e.get('released_usd',0):,.2f})",
+        f"• Beneficiary: {handle_line}",
+        "",
+        f"Tx: https://basescan.org/tx/{e['tx_hash']}",
+    ]
+    return {"card": "\n".join(lines), "event": e}
+
+
 @api_router.get("/leaderboard")
-async def leaderboard(limit: int = Query(10, ge=1, le=50)):
-    """Top claimers by total ETH claimed."""
+async def leaderboard(limit: int = Query(15, ge=1, le=100)):
     pipeline = [
         {"$group": {
-            "_id": "$claimer_handle",
+            "_id": {"handle": "$claimer_handle", "wallet": "$beneficiary"},
             "total_eth": {"$sum": "$amount_eth"},
             "total_usd": {"$sum": "$amount_usd"},
             "claim_count": {"$sum": 1},
@@ -412,37 +909,76 @@ async def leaderboard(limit: int = Query(10, ge=1, le=50)):
         {"$limit": limit},
     ]
     rows = await db.claim_events.aggregate(pipeline).to_list(limit)
-    leaderboard_data = []
+    out = []
     for i, r in enumerate(rows):
-        leaderboard_data.append({
+        out.append({
             "rank": i + 1,
-            "handle": r["_id"],
+            "handle": r["_id"].get("handle"),
+            "wallet": r["_id"].get("wallet"),
             "avatar": r.get("avatar"),
-            "total_eth": round(float(r["total_eth"]), 4),
+            "total_eth": round(float(r["total_eth"]), 6),
             "total_usd": round(float(r["total_usd"]), 2),
             "claim_count": int(r["claim_count"]),
             "last_claim": r.get("last_claim"),
         })
-    return {"items": leaderboard_data}
+    return {"items": out}
+
+
+@api_router.get("/leaderboard/lifetime")
+async def leaderboard_lifetime(limit: int = Query(15, ge=1, le=100)):
+    """Top fee claimers ranked by total ETH claimed across all events.
+    Shows X handle when resolved, wallet otherwise."""
+    pipeline = [
+        {"$group": {
+            "_id": {
+                "handle": "$claimer_handle",
+                "wallet": "$beneficiary",
+            },
+            "lifetime_eth": {"$sum": "$amount_eth"},
+            "claim_count": {"$sum": 1},
+            "tokens": {"$addToSet": "$token_address"},
+            "avatar": {"$first": "$claimer_avatar"},
+        }},
+        {"$sort": {"lifetime_eth": -1}},
+        {"$limit": limit},
+    ]
+    rows = await db.claim_events.aggregate(pipeline).to_list(limit)
+    out = []
+    for i, r in enumerate(rows):
+        eth = float(r.get("lifetime_eth") or 0)
+        out.append({
+            "rank": i + 1,
+            "handle": r["_id"].get("handle"),
+            "wallet": r["_id"].get("wallet"),
+            "avatar": r.get("avatar"),
+            "lifetime_eth": round(eth, 6),
+            "lifetime_usd": round(eth * ETH_PRICE_USD, 2),
+            "claim_count": int(r["claim_count"]),
+            "tokens": len([t for t in (r.get("tokens") or []) if t]),
+        })
+    return {"items": out}
 
 
 @api_router.get("/tokens")
-async def list_tokens(limit: int = Query(50, ge=1, le=200)):
-    cur = db.tokens.find({}, {"_id": 0}).sort("total_claimed_eth", -1).limit(limit)
+async def list_tokens(limit: int = Query(100, ge=1, le=500)):
+    cur = (
+        db.tokens.find({}, {"_id": 0})
+        .sort("total_claimed_eth", -1)
+        .limit(limit)
+    )
     items = await cur.to_list(limit)
     return {"items": items}
 
 
 @api_router.get("/tokens/{address}")
 async def token_detail(address: str):
-    tok = await db.tokens.find_one({"address": address.lower()}, {"_id": 0})
+    addr = address.lower()
+    tok = await db.tokens.find_one({"address": addr}, {"_id": 0})
     if not tok:
         raise HTTPException(status_code=404, detail="token not found")
-
-    # daily timeline (14 days)
     since = datetime.now(timezone.utc) - timedelta(days=14)
     pipeline = [
-        {"$match": {"token_address": address.lower(), "timestamp": {"$gte": since.isoformat()}}},
+        {"$match": {"token_address": addr, "timestamp": {"$gte": since.isoformat()}}},
         {"$group": {
             "_id": {"$substr": ["$timestamp", 0, 10]},
             "eth": {"$sum": "$amount_eth"},
@@ -453,130 +989,101 @@ async def token_detail(address: str):
     ]
     timeline = await db.claim_events.aggregate(pipeline).to_list(50)
     timeline_data = [
-        {"date": t["_id"], "eth": round(float(t["eth"]), 4),
+        {"date": t["_id"], "eth": round(float(t["eth"]), 6),
          "usd": round(float(t["usd"]), 2), "count": int(t["count"])}
         for t in timeline
     ]
+    recent = (
+        await db.claim_events.find({"token_address": addr}, {"_id": 0})
+        .sort("timestamp", -1)
+        .limit(20)
+        .to_list(20)
+    )
+    return {"token": tok, "timeline": timeline_data, "recent_claims": recent}
 
-    recent = await db.claim_events.find(
-        {"token_address": address.lower()}, {"_id": 0}
-    ).sort("timestamp", -1).limit(15).to_list(15)
 
-    # try to enrich with live Bankr API data
-    bankr_live = await fetch_bankr_fees(address)
-
+@api_router.get("/handle/{handle}")
+async def claimer_detail(handle: str):
+    events = (
+        await db.claim_events.find({"claimer_handle": handle}, {"_id": 0})
+        .sort("timestamp", -1).limit(100).to_list(100)
+    )
+    if not events:
+        raise HTTPException(status_code=404, detail="no claims found for handle")
+    total_eth = sum(e["amount_eth"] for e in events)
+    total_usd = sum(e["amount_usd"] for e in events)
+    tokens_claimed = sorted({e["token_symbol"] for e in events if e.get("token_symbol")})
     return {
-        "token": tok,
-        "timeline": timeline_data,
-        "recent_claims": recent,
-        "bankr_live": bankr_live,
-    }
-
-
-@api_router.post("/tokens/track")
-async def track_token(payload: TokenCreate):
-    addr = payload.address.lower().strip()
-    if not addr.startswith("0x") or len(addr) != 42:
-        raise HTTPException(status_code=400, detail="invalid base address")
-
-    existing = await db.tokens.find_one({"address": addr}, {"_id": 0})
-    if existing:
-        return {"status": "exists", "token": existing}
-
-    # Try to enrich from Bankr
-    bankr = await fetch_bankr_fees(addr)
-    symbol = payload.symbol or (bankr or {}).get("token", {}).get("symbol") or "TOKEN"
-    name = payload.name or (bankr or {}).get("token", {}).get("name") or "Unknown Token"
-    handle = payload.creator_handle or (bankr or {}).get("creator", {}).get("xUsername") or "unknown"
-
-    creator = next((c for c in SEED_CREATORS if c["handle"] == handle), {
         "handle": handle,
-        "avatar": f"https://api.dicebear.com/9.x/identicon/svg?seed={handle}&backgroundColor=00FF66",
-    })
-
-    claimed_eth = 0.0
-    claimable_eth = 0.0
-    if bankr:
-        try:
-            claimed_eth = float(bankr.get("claimed", {}).get("eth", 0) or 0)
-            claimable_eth = float(bankr.get("claimable", {}).get("eth", 0) or 0)
-        except Exception:
-            pass
-
-    doc = {
-        "id": str(uuid.uuid4()),
-        "address": addr,
-        "symbol": symbol.upper(),
-        "name": name,
-        "creator_handle": handle,
-        "creator_avatar": creator["avatar"],
-        "chain": "base",
-        "launched_at": now_iso(),
-        "total_claimed_eth": claimed_eth,
-        "total_claimed_usd": round(claimed_eth * ETH_PRICE_USD, 2),
-        "claimable_eth": claimable_eth,
-        "last_polled": now_iso(),
+        "avatar": events[0].get("claimer_avatar"),
+        "wallet": events[0].get("beneficiary"),
+        "x_url": f"https://x.com/{handle}",
+        "total_eth": round(total_eth, 6),
+        "total_usd": round(total_usd, 2),
+        "lifetime_eth": round(total_eth, 6),
+        "lifetime_eth_claimed": round(total_eth, 6),
+        "claim_count": len(events),
+        "tokens_owned": len(tokens_claimed),
+        "tokens_claimed": tokens_claimed,
+        "tokens": [],
+        "claims": events,
     }
-    await db.tokens.insert_one(doc)
-    doc.pop("_id", None)
-    return {"status": "added", "token": doc}
+
+
+@api_router.get("/wallet/{address}")
+async def wallet_detail(address: str):
+    addr = address.lower()
+    events = (
+        await db.claim_events.find({"beneficiary": addr}, {"_id": 0})
+        .sort("timestamp", -1).limit(100).to_list(100)
+    )
+    if not events:
+        raise HTTPException(status_code=404, detail="no claims for wallet")
+    total_eth = sum(e["amount_eth"] for e in events)
+    total_usd = sum(e["amount_usd"] for e in events)
+    handles = sorted({e["claimer_handle"] for e in events if e.get("claimer_handle")})
+    return {
+        "wallet": addr,
+        "handle": handles[0] if handles else None,
+        "all_handles": handles,
+        "avatar": events[0].get("claimer_avatar"),
+        "total_eth": round(total_eth, 6),
+        "total_usd": round(total_usd, 2),
+        "claim_count": len(events),
+        "tokens_claimed": sorted({e["token_symbol"] for e in events if e.get("token_symbol")}),
+        "claims": events,
+    }
 
 
 @api_router.get("/search")
 async def search(q: str = Query(..., min_length=1)):
-    """Search across handles + tokens."""
     qrx = {"$regex": q, "$options": "i"}
-    claimers = await db.claim_events.aggregate([
+    handles = await db.claim_events.aggregate([
         {"$match": {"claimer_handle": qrx}},
-        {"$group": {"_id": "$claimer_handle", "avatar": {"$first": "$claimer_avatar"},
-                    "total_eth": {"$sum": "$amount_eth"}, "count": {"$sum": 1}}},
+        {"$group": {"_id": "$claimer_handle",
+                    "avatar": {"$first": "$claimer_avatar"},
+                    "total_eth": {"$sum": "$amount_eth"},
+                    "count": {"$sum": 1}}},
         {"$limit": 10},
     ]).to_list(10)
-
     tokens = await db.tokens.find(
         {"$or": [{"symbol": qrx}, {"name": qrx}, {"address": q.lower()}]},
         {"_id": 0},
     ).limit(10).to_list(10)
-
     return {
-        "claimers": [
-            {"handle": c["_id"], "avatar": c.get("avatar"),
-             "total_eth": round(float(c["total_eth"]), 4), "count": int(c["count"])}
-            for c in claimers
+        "handles": [
+            {"handle": h["_id"], "avatar": h.get("avatar"),
+             "total_eth": round(float(h.get("total_eth") or 0), 4),
+             "count": int(h.get("count") or 0)} for h in handles
         ],
         "tokens": tokens,
     }
 
 
-@api_router.get("/handle/{handle}")
-async def claimer_detail(handle: str):
-    """Detail page for a Twitter handle."""
-    events = await db.claim_events.find(
-        {"claimer_handle": handle}, {"_id": 0}
-    ).sort("timestamp", -1).limit(50).to_list(50)
-
-    if not events:
-        raise HTTPException(status_code=404, detail="no claims found for handle")
-
-    total_eth = sum(e["amount_eth"] for e in events)
-    total_usd = sum(e["amount_usd"] for e in events)
-    avatar = events[0].get("claimer_avatar")
-    tokens_claimed = list({e["token_symbol"] for e in events})
-
-    return {
-        "handle": handle,
-        "avatar": avatar,
-        "total_eth": round(total_eth, 4),
-        "total_usd": round(total_usd, 2),
-        "claim_count": len(events),
-        "tokens_claimed": tokens_claimed,
-        "claims": events,
-    }
-
-
-# Include the router in the main app
+# ============================================================
+# WIRE UP
+# ============================================================
 app.include_router(api_router)
-
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -585,19 +1092,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_bg_tasks: List[asyncio.Task] = []
+
 
 @app.on_event("startup")
 async def startup_event():
-    global _poller_task
+    state = await db.indexer_state.find_one({"_id": "main"})
+    if not state or (state and state.get("version", 0) < 4):
+        # v3 -> v4: switch to Released-event indexing; reset claim events
+        d1 = await db.claim_events.delete_many({})
+        d2 = await db.tokens.delete_many({})
+        await db.indexer_state.delete_many({})
+        logger.info(
+            f"v3->v4 migration: cleared {d1.deleted_count} events, {d2.deleted_count} tokens"
+        )
+
+    await db.claim_events.create_index([("timestamp", -1)])
+    await db.claim_events.create_index([("token_address", 1)])
+    await db.claim_events.create_index([("claimer_handle", 1)])
+    await db.claim_events.create_index([("beneficiary", 1)])
+    await db.claim_events.create_index([("key", 1)], unique=True)
+    await db.tokens.create_index([("address", 1)], unique=True)
+    await db.tokens.create_index([("creator_handle", 1)])
+    await db.bankr_launches.create_index([("tokenAddress", 1)], unique=True)
+    await db.bankr_launches.create_index([("feeRecipient.walletAddress", 1)])
+
     await fetch_eth_price()
-    await seed_database()
-    _poller_task = asyncio.create_task(background_poller())
-    logger.info("Bankr monitor startup complete")
+    _bg_tasks.append(asyncio.create_task(launches_syncer_loop()))
+    _bg_tasks.append(asyncio.create_task(price_refresher_loop()))
+    _bg_tasks.append(asyncio.create_task(onchain_indexer_loop()))
+    _bg_tasks.append(asyncio.create_task(token_resolver_loop()))
+    logger.info("Bankr Monitor v4 startup complete · Released-event indexing")
 
 
 @app.on_event("shutdown")
-async def shutdown_db_client():
-    global _poller_task
-    if _poller_task:
-        _poller_task.cancel()
+async def shutdown():
+    for t in _bg_tasks:
+        t.cancel()
     client.close()

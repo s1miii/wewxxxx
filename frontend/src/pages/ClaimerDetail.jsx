@@ -31,10 +31,7 @@ export default function ClaimerDetail() {
 
   return (
     <div className="space-y-6" data-testid="claimer-detail-page">
-      <Link
-        to="/"
-        className="inline-flex items-center gap-2 text-xs text-[#8A8A93] hover:text-[#00FF66] transition-colors"
-      >
+      <Link to="/" className="inline-flex items-center gap-2 text-xs text-[#8A8A93] hover:text-[#00FF66] transition-colors">
         <ArrowLeft size={12} /> BACK
       </Link>
 
@@ -42,16 +39,19 @@ export default function ClaimerDetail() {
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="flex items-center gap-4">
             <img
-              src={data.avatar}
+              src={data.avatar || `https://unavatar.io/x/${data.handle}`}
               alt={data.handle}
               className="w-16 h-16 border border-[#00FF66] glow-green"
+              onError={(ev) => {
+                ev.target.src = `https://api.dicebear.com/9.x/identicon/svg?seed=${data.handle}&backgroundColor=00FF66`;
+              }}
             />
             <div>
               <h1 className="text-head text-3xl font-bold text-white tracking-tighter">
                 @{data.handle}
               </h1>
               <a
-                href={`https://x.com/${data.handle}`}
+                href={data.x_url || `https://x.com/${data.handle}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 mt-1 text-xs text-[#00F0FF] hover:underline"
@@ -59,16 +59,30 @@ export default function ClaimerDetail() {
               >
                 <Twitter size={12} /> View on x.com <ExternalLink size={10} />
               </a>
+              {data.wallet && (
+                <a
+                  href={`https://basescan.org/address/${data.wallet}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block mt-1 text-[10px] font-mono text-[#52525B] hover:text-[#00FF66]"
+                >
+                  {shortAddress(data.wallet)}
+                </a>
+              )}
             </div>
           </div>
-          <div className="grid grid-cols-3 gap-6 text-right">
+          <div className="grid grid-cols-4 gap-4 text-right">
             <div>
-              <div className="text-[10px] tracking-widest text-[#52525B] uppercase">Total ETH</div>
-              <div className="text-[#00FF66] text-xl font-bold glow-green">{formatEth(data.total_eth)}</div>
+              <div className="text-[10px] tracking-widest text-[#52525B] uppercase">Lifetime ETH</div>
+              <div className="text-[#00FF66] text-xl font-bold glow-green">{formatEth(data.lifetime_eth || 0)}</div>
             </div>
             <div>
-              <div className="text-[10px] tracking-widest text-[#52525B] uppercase">USD</div>
-              <div className="text-white text-xl font-bold">{formatUsd(data.total_usd)}</div>
+              <div className="text-[10px] tracking-widest text-[#52525B] uppercase">Live ETH</div>
+              <div className="text-white text-xl font-bold">{formatEth(data.total_eth || 0)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] tracking-widest text-[#52525B] uppercase">Tokens</div>
+              <div className="text-[#00F0FF] text-xl font-bold">{data.tokens_owned || 0}</div>
             </div>
             <div>
               <div className="text-[10px] tracking-widest text-[#52525B] uppercase">Claims</div>
@@ -76,55 +90,68 @@ export default function ClaimerDetail() {
             </div>
           </div>
         </div>
-        <div className="mt-4 pt-4 border-t border-[#00FF66]/10">
-          <div className="text-[10px] tracking-widest text-[#52525B] uppercase mb-2">Tokens Claimed</div>
-          <div className="flex flex-wrap gap-2">
-            {data.tokens_claimed.map((s) => (
-              <span
-                key={s}
-                className="px-2 py-1 border border-[#00F0FF]/40 text-[#00F0FF] text-xs font-mono"
+        {data.tokens_claimed && data.tokens_claimed.length > 0 && (
+          <div className="mt-4 pt-4 border-t border-[#00FF66]/10">
+            <div className="text-[10px] tracking-widest text-[#52525B] uppercase mb-2">Tokens Owned</div>
+            <div className="flex flex-wrap gap-2">
+              {data.tokens_claimed.map((s) => (
+                <span key={s} className="px-2 py-1 border border-[#00F0FF]/40 text-[#00F0FF] text-xs font-mono">
+                  ${s}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {data.tokens && data.tokens.length > 0 && (
+        <div className="panel corners">
+          <div className="p-4 border-b border-[#00FF66]/20 text-head text-sm tracking-[0.2em] uppercase">
+            Owned Tokens
+          </div>
+          <div className="divide-y divide-[#00FF66]/10">
+            {data.tokens.map((t) => (
+              <Link
+                key={t.address}
+                to={`/tokens/${t.address}`}
+                className="flex items-center gap-4 p-3 hover:bg-[#00FF66]/5"
               >
-                ${s}
-              </span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[#00F0FF] font-semibold">${t.symbol}</div>
+                  <div className="text-[10px] text-[#52525B] truncate">{t.name}</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-[#00FF66] font-semibold">{formatEth(t.lifetime_earned_weth || t.total_claimed_eth || 0)} Ξ</div>
+                  <div className="text-[10px] text-[#52525B]">{t.total_claim_count || 0} claims</div>
+                </div>
+              </Link>
             ))}
           </div>
         </div>
-      </div>
+      )}
 
-      <div className="panel corners">
-        <div className="p-4 border-b border-[#00FF66]/20 text-head text-sm tracking-[0.2em] uppercase">
-          Claim History
-        </div>
-        <div className="divide-y divide-[#00FF66]/10">
-          {data.claims.map((c) => (
-            <div
-              key={c.id}
-              className="flex items-center gap-4 p-3 hover:bg-[#00FF66]/5"
-              data-testid={`claim-history-${c.id}`}
-            >
-              <Link to={`/tokens/${c.token_address}`} className="flex-1 min-w-0">
-                <div className="text-[#00F0FF] font-semibold">${c.token_symbol}</div>
-                <div className="text-[10px] text-[#52525B] truncate">{c.token_name}</div>
-              </Link>
-              <div className="text-right">
-                <div className="text-[#00FF66] font-semibold">{formatEth(c.amount_eth)} Ξ</div>
-                <div className="text-[10px] text-[#52525B]">{formatUsd(c.amount_usd)}</div>
+      {data.claims && data.claims.length > 0 && (
+        <div className="panel corners">
+          <div className="p-4 border-b border-[#00FF66]/20 text-head text-sm tracking-[0.2em] uppercase">
+            Live Claim History
+          </div>
+          <div className="divide-y divide-[#00FF66]/10">
+            {data.claims.map((c) => (
+              <div key={c.id} className="flex items-center gap-4 p-3 hover:bg-[#00FF66]/5">
+                <Link to={`/tokens/${c.token_address}`} className="flex-1 min-w-0">
+                  <div className="text-[#00F0FF] font-semibold">${c.token_symbol}</div>
+                  <div className="text-[10px] text-[#52525B] truncate">{c.token_name}</div>
+                </Link>
+                <div className="text-right">
+                  <div className="text-[#00FF66] font-semibold">{formatEth(c.amount_eth)} Ξ</div>
+                  <div className="text-[10px] text-[#52525B]">{formatUsd(c.amount_usd)}</div>
+                </div>
+                <div className="text-right text-xs text-[#8A8A93] w-20">{timeAgo(c.timestamp)} ago</div>
               </div>
-              <div className="text-right text-xs text-[#8A8A93] w-20">
-                {timeAgo(c.timestamp)} ago
-              </div>
-              <a
-                href={`https://basescan.org/tx/${c.tx_hash}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-[#8A8A93] hover:text-[#00FF66]"
-              >
-                <ExternalLink size={12} />
-              </a>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

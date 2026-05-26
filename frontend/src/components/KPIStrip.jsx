@@ -39,33 +39,33 @@ export default function KPIStrip({ stats }) {
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="kpi-strip">
       <KPI
-        label="Total Claims"
-        value={stats.total_claims.toLocaleString()}
-        sub={`+${stats.claims_24h} last 24h`}
+        label="Lifetime Claims"
+        value={(stats.lifetime_claim_count || 0).toLocaleString()}
+        sub={`${stats.total_claims} since monitor start`}
         icon={Zap}
         accent="text-[#00FF66] glow-green"
         testid="kpi-total-claims"
       />
       <KPI
-        label="Total ETH Claimed"
-        value={`${formatEth(stats.total_eth)} Ξ`}
-        sub={formatUsd(stats.total_usd)}
+        label="Lifetime ETH"
+        value={`${formatEth(stats.lifetime_eth || 0)} Ξ`}
+        sub={formatUsd(stats.lifetime_usd || 0)}
         icon={Coins}
         accent="text-[#00F0FF] glow-cyan"
         testid="kpi-total-eth"
       />
       <KPI
-        label="Unique Claimers"
-        value={stats.unique_claimers}
-        sub="x.com handles"
+        label="X Creators"
+        value={stats.unique_handles || 0}
+        sub={`${stats.bankr_launches_indexed} launches indexed`}
         icon={Users}
         accent="text-[#FFE600]"
         testid="kpi-unique-claimers"
       />
       <KPI
-        label="24h Volume"
+        label="Live 24h Claims"
         value={`${formatEth(stats.eth_24h)} Ξ`}
-        sub={formatUsd(stats.usd_24h)}
+        sub={`${stats.claims_24h} new claims · ${formatUsd(stats.usd_24h)}`}
         icon={TrendingUp}
         accent="text-[#FF007A] glow-pink"
         testid="kpi-24h-volume"

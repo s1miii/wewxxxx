@@ -1,3 +1,4 @@
+import LifetimeLeaderboard from "@/components/LifetimeLeaderboard";
 import Leaderboard from "@/components/Leaderboard";
 
 export default function LeaderboardPage() {
@@ -11,10 +12,13 @@ export default function LeaderboardPage() {
           Top Fee <span className="text-[#FFE600] glow-cyan">Claimers</span>
         </h1>
         <p className="text-sm text-[#8A8A93] mt-1">
-          Twitter / x.com handles ranked by total ETH claimed from Bankr-launched tokens.
+          Twitter / x.com handles ranked by ETH claimed from Bankr-launched
+          tokens on Base. Lifetime totals come from Bankr's public API; live
+          totals are what we've observed since this monitor started.
         </p>
       </div>
-      <div className="max-w-3xl">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <LifetimeLeaderboard limit={25} />
         <Leaderboard limit={25} />
       </div>
     </div>

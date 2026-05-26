@@ -6,6 +6,7 @@ import Header from "@/components/Header";
 import Dashboard from "@/pages/Dashboard";
 import TokenDetail from "@/pages/TokenDetail";
 import ClaimerDetail from "@/pages/ClaimerDetail";
+import WalletDetail from "@/pages/WalletDetail";
 import LeaderboardPage from "@/pages/LeaderboardPage";
 import TokensPage from "@/pages/TokensPage";
 import { getStats } from "@/lib/api";
@@ -38,10 +39,11 @@ function App() {
             <Route path="/tokens/:address" element={<TokenDetail />} />
             <Route path="/leaderboard" element={<LeaderboardPage />} />
             <Route path="/handle/:handle" element={<ClaimerDetail />} />
+            <Route path="/wallet/:address" element={<WalletDetail />} />
           </Routes>
         </main>
         <footer className="border-t border-[#00FF66]/15 mt-12 py-6 text-center text-[10px] tracking-[0.3em] text-[#52525B] uppercase">
-          BANKR.SCAN · MONITORING BANKR BOT FEE CLAIMS ON BASE · DATA via docs.bankr.bot
+          BANKR.SCAN · INDEXING 0xD59cE43E…91178 ON BASE · ERC20 + BANKR API
         </footer>
       </BrowserRouter>
       <Toaster

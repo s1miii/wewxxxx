@@ -34,10 +34,10 @@ export default function TokensTable() {
             <tr className="text-[10px] tracking-[0.2em] uppercase text-[#8A8A93] border-b border-[#00FF66]/20">
               <th className="text-left py-3 px-4">Token</th>
               <th className="text-left py-3 px-4">Creator</th>
-              <th className="text-left py-3 px-4 hidden md:table-cell">Address</th>
-              <th className="text-right py-3 px-4">Claimed</th>
+              <th className="text-left py-3 px-4 hidden md:table-cell">Contract</th>
+              <th className="text-right py-3 px-4">Lifetime ETH</th>
               <th className="text-right py-3 px-4 hidden lg:table-cell">USD</th>
-              <th className="text-right py-3 px-4 hidden sm:table-cell">Launched</th>
+              <th className="text-right py-3 px-4 hidden sm:table-cell">Claims</th>
             </tr>
           </thead>
           <tbody>
@@ -61,19 +61,23 @@ export default function TokensTable() {
                   </Link>
                 </td>
                 <td className="py-3 px-4">
-                  <Link
-                    to={`/handle/${t.creator_handle}`}
-                    className="inline-flex items-center gap-2 group"
-                  >
-                    <img
-                      src={t.creator_avatar}
-                      alt={t.creator_handle}
-                      className="w-6 h-6 border border-[#00FF66]/30"
-                    />
-                    <span className="text-white group-hover:text-[#00FF66] transition-colors text-xs">
-                      @{t.creator_handle}
-                    </span>
-                  </Link>
+                  {t.creator_handle ? (
+                    <Link
+                      to={`/handle/${t.creator_handle}`}
+                      className="inline-flex items-center gap-2 group"
+                    >
+                      <img
+                        src={t.creator_avatar}
+                        alt={t.creator_handle}
+                        className="w-6 h-6 border border-[#00FF66]/30"
+                      />
+                      <span className="text-white group-hover:text-[#00FF66] transition-colors text-xs">
+                        @{t.creator_handle}
+                      </span>
+                    </Link>
+                  ) : (
+                    <span className="text-[#52525B] text-xs italic">— unresolved —</span>
+                  )}
                 </td>
                 <td className="py-3 px-4 hidden md:table-cell">
                   <a
@@ -86,13 +90,13 @@ export default function TokensTable() {
                   </a>
                 </td>
                 <td className="py-3 px-4 text-right text-[#00FF66] font-semibold">
-                  {formatEth(t.total_claimed_eth)} Ξ
+                  {formatEth(t.lifetime_earned_weth || t.total_claimed_eth || 0)} Ξ
                 </td>
                 <td className="py-3 px-4 text-right text-xs text-white hidden lg:table-cell">
-                  {formatUsd(t.total_claimed_usd)}
+                  {formatUsd((t.lifetime_earned_weth || t.total_claimed_eth || 0) * 1)}
                 </td>
-                <td className="py-3 px-4 text-right text-xs text-[#52525B] hidden sm:table-cell">
-                  {timeAgo(t.launched_at)} ago
+                <td className="py-3 px-4 text-right text-xs text-[#FFE600] hidden sm:table-cell">
+                  {t.total_claim_count || 0}
                 </td>
               </tr>
             ))}
