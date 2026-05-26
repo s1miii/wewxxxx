@@ -731,6 +731,12 @@ async def process_released_event(
         token_amount = token_amount_raw / (10 ** token_decimals) if token_addr else 0
 
         creator = await lookup_bankr_creator(token_addr) if token_addr else {}
+        # Live fallback — when the token isn't in our local cache yet
+        # (just launched / between sync cycles), hit Bankr's API directly.
+        if token_addr and not creator.get("handle"):
+            live = await fetch_bankr_token_creator_live(token_addr, cli)
+            if live.get("handle"):
+                creator = live
         claimer_handle = creator.get("handle")
         claimer_avatar = creator.get("avatar")
 
