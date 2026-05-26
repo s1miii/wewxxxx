@@ -50,6 +50,7 @@ DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
 # Telegram alerting
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_ENABLED = os.environ.get("TELEGRAM_ENABLED", "true").lower() in ("1", "true", "yes")
 TELEGRAM_API = (
     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else None
 )
@@ -538,7 +539,7 @@ def build_telegram_message(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def send_telegram_alert(event: Dict[str, Any], cli: httpx.AsyncClient) -> bool:
-    if not TELEGRAM_API or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_ENABLED or not TELEGRAM_API or not TELEGRAM_CHAT_ID:
         return False
     try:
         msg = build_telegram_message(event)
