@@ -1,0 +1,95 @@
+{
+  "theme": "dark",
+  "archetype": "7 (Electric & Neon)",
+  "vibe": "Terminal/Trader, Retro-Futurism, On-Chain Analytics",
+  "colors": {
+    "background": "#050505",
+    "surface": "#0F0F13",
+    "surface_glass": "rgba(15, 15, 19, 0.6)",
+    "border": "rgba(0, 255, 102, 0.2)",
+    "primary": "#00FF66", 
+    "secondary": "#00F0FF",
+    "accent_yellow": "#FFE600",
+    "accent_pink": "#FF007A",
+    "text_primary": "#FFFFFF",
+    "text_secondary": "#8A8A93",
+    "text_muted": "#52525B"
+  },
+  "typography": {
+    "headings_font": "Azeret Mono, monospace",
+    "body_font": "IBM Plex Mono, monospace",
+    "scales": {
+      "h1": "text-4xl sm:text-5xl tracking-tighter",
+      "h2": "text-2xl sm:text-3xl tracking-tight",
+      "h3": "text-xl sm:text-2xl",
+      "body": "text-sm",
+      "small": "text-xs tracking-[0.1em] uppercase"
+    }
+  },
+  "layout_and_spacing": {
+    "grid_system": "MODE B: THE CONTROL ROOM GRID",
+    "container_padding": "p-6",
+    "gap": "gap-6",
+    "borders": "1px solid rgba(0, 255, 102, 0.2)"
+  },
+  "components": {
+    "cards": {
+      "style": "Retro-Futurism (Terminal Look)",
+      "background": "bg-[#0F0F13]",
+      "border": "border border-[#00FF66]/20",
+      "hover": "hover:border-[#00FF66]/60 hover:shadow-[0_0_15px_rgba(0,255,102,0.15)] transition-all duration-300",
+      "radius": "rounded-none"
+    },
+    "buttons": {
+      "primary": "bg-[#00FF66] text-black font-bold uppercase tracking-wider hover:bg-[#00FF66]/80 hover:shadow-[0_0_20px_rgba(0,255,102,0.4)] transition-all",
+      "secondary": "bg-transparent border border-[#00F0FF] text-[#00F0FF] hover:bg-[#00F0FF]/10",
+      "radius": "rounded-none"
+    },
+    "tables": {
+      "header": "text-[#8A8A93] uppercase text-xs tracking-widest border-b border-[#00FF66]/20 pb-3",
+      "row": "border-b border-[#00FF66]/10 hover:bg-[#00FF66]/5 transition-colors",
+      "cell": "py-4 text-sm font-mono"
+    },
+    "header": {
+      "style": "Crystal Glass / Terminal",
+      "background": "backdrop-blur-xl bg-[#050505]/80",
+      "border": "border-b border-[#00FF66]/20"
+    }
+  },
+  "motion_and_interactions": {
+    "hover_states": "High contrast color shifts, subtle glow effects (box-shadow)",
+    "transitions": "transition-all duration-200 ease-out",
+    "loading": "ASCII art loaders or flashing cursor effects"
+  },
+  "icons_library": "lucide-react",
+  "media": {
+    "images": [
+      {
+        "category": "abstract_background",
+        "url": "https://images.pexels.com/photos/5380603/pexels-photo-5380603.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Dark room setup with code displayed on PC monitors highlighting cybersecurity themes."
+      },
+      {
+        "category": "terminal_texture",
+        "url": "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzV8MHwxfHNlYXJjaHwxfHxoYWNrZXIlMjB0ZXJtaW5hbCUyMGFic3RyYWN0JTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3Nzk3ODc5MzR8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Matrix movie still / dark terminal texture"
+      }
+    ],
+    "guidelines": "Use abstract_background as a low-opacity (10-15%) overlay with multiply/screen blend modes to give the dashboard a raw, hacker-terminal feel. Do not use generic placeholders."
+  },
+  "instructions_to_main_agent": [
+    "Build a live feed dashboard tracking Bankr Bot claim events on Base.",
+    "Use Archetype 7 (Electric & Neon) with a deep void black background and high-contrast neon accents (Green, Cyan, Pink). Avoid teal #1B93A4 or purple #7351B7.",
+    "Implement the 'Control Room' grid: dense, modular data panels.",
+    "Avoid border-radius (use rounded-none) to emphasize the retro-futurism/terminal look.",
+    "Import fonts via Google Fonts in index.css: 'Azeret Mono' and 'IBM Plex Mono'.",
+    "Use Azeret Mono for headings and IBM Plex Mono for body text.",
+    "Ensure all text has adequate contrast. Use text shadows for glows.",
+    "Component logic: Use custom HTML/Tailwind for structural bento layouts, but wrap Shadcn components for complex interactions if needed (e.g., Dialogs). Strip Shadcn's default borders/radius and apply the terminal style.",
+    "Top KPI strip: Total Claims, Total ETH, Unique Claimers, 24h Claims.",
+    "Main sections: Live Feed (table or scrolling list), Top Claimers (leaderboard), Token Detail Chart (Recharts).",
+    "Include an 'Add Token' input field with terminal-style styling.",
+    "For the live feed, mock the data using realistic Twitter handles, token tickers, and ETH amounts. Ensure each event card has the Twitter avatar and Basescan tx link.",
+    "Add data-testid attributes to all interactive and key informational elements."
+  ]
+}
