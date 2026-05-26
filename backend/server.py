@@ -40,6 +40,11 @@ BASE_RPC_FALLBACKS = [
     "https://mainnet.base.org",
 ]
 BANKR_API = "https://api.bankr.bot"
+BANKR_API_KEY = os.environ.get("BANKR_API_KEY", "")
+BANKR_HEADERS = (
+    {"Authorization": f"Bearer {BANKR_API_KEY}", "x-api-key": BANKR_API_KEY}
+    if BANKR_API_KEY else {}
+)
 DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
 
 # Bankr / Doppler StreamableFeesLocker — RELEASED event topic
@@ -207,6 +212,7 @@ async def sync_bankr_launches(cli: httpx.AsyncClient, max_pages: int = 100):
             r = await cli.get(
                 f"{BANKR_API}/token-launches",
                 params={"limit": 50, "offset": page * 50},
+                headers=BANKR_HEADERS,
                 timeout=10.0,
             )
             if r.status_code == 429 or r.status_code == 503:
@@ -241,7 +247,7 @@ async def sync_bankr_launches(cli: httpx.AsyncClient, max_pages: int = 100):
             if len(launches) < 50:
                 break
             page += 1
-            await asyncio.sleep(0.8)  # be polite — Bankr API is sensitive
+            await asyncio.sleep(0.2)  # authenticated — go faster
         except Exception as e:
             logger.warning(f"launches sync page {page} failed: {e}")
             consecutive_failures += 1
@@ -287,34 +293,43 @@ async def lookup_bankr_creator(token_addr: str) -> Dict[str, Any]:
 
 
 async def fetch_bankr_token_creator_live(token_addr: str, cli: httpx.AsyncClient) -> Dict[str, Any]:
-    """Fallback: call /public/doppler/token-fees/{token} to get creator info
-    even for tokens not in our /token-launches registry."""
+    """Fallback for tokens not in our /token-launches sync (which only returns
+    the latest 50). Uses authenticated /token-launches/{addr} which returns the
+    full launch record including feeRecipient.xUsername."""
     try:
         r = await cli.get(
-            f"{BANKR_API}/public/doppler/token-fees/{token_addr}",
-            params={"days": 1}, timeout=8.0,
+            f"{BANKR_API}/token-launches/{token_addr}",
+            headers=BANKR_HEADERS, timeout=8.0,
         )
         if r.status_code != 200:
             return {}
         body = r.json() or {}
-        # The endpoint response wraps a `tokens` array — find our token
-        for t in body.get("tokens", []):
-            if (t.get("tokenAddress") or "").lower() == token_addr.lower():
-                creator = t.get("creator") or body.get("creator") or {}
-                handle = creator.get("xUsername") or creator.get("username")
-                if not handle:
-                    return {
-                        "symbol_from_registry": t.get("symbol"),
-                        "name_from_registry": t.get("name"),
-                    }
-                return {
-                    "handle": handle,
-                    "avatar": creator.get("xProfileImageUrl")
-                              or f"https://unavatar.io/x/{handle}",
-                    "wallet": creator.get("walletAddress"),
-                    "symbol_from_registry": t.get("symbol"),
-                    "name_from_registry": t.get("name"),
-                }
+        launch = body.get("launch") or body
+        if not isinstance(launch, dict):
+            return {}
+        # cache the full launch in bankr_launches for future lookups
+        addr = (launch.get("tokenAddress") or token_addr).lower()
+        for k in ("deployer", "feeRecipient"):
+            if isinstance(launch.get(k), dict) and launch[k].get("walletAddress"):
+                launch[k]["walletAddress"] = launch[k]["walletAddress"].lower()
+        launch["tokenAddress"] = addr
+        await db.bankr_launches.update_one(
+            {"tokenAddress": addr}, {"$set": launch}, upsert=True
+        )
+        rec = launch.get("feeRecipient") or launch.get("deployer") or {}
+        if not rec.get("xUsername") and isinstance(launch.get("deployer"), dict):
+            if launch["deployer"].get("xUsername"):
+                rec = launch["deployer"]
+        handle = rec.get("xUsername")
+        return {
+            "handle": handle,
+            "avatar": rec.get("xProfileImageUrl")
+                      or (f"https://unavatar.io/x/{handle}" if handle else None),
+            "wallet": rec.get("walletAddress"),
+            "tweet_url": launch.get("tweetUrl"),
+            "symbol_from_registry": launch.get("tokenSymbol"),
+            "name_from_registry": launch.get("tokenName"),
+        }
     except Exception as e:
         logger.debug(f"live bankr creator lookup fail {token_addr}: {e}")
     return {}
@@ -702,9 +717,10 @@ async def price_refresher_loop():
 
 
 async def token_resolver_loop():
-    """Background task: re-resolve tokens that still show '?' or 'TOK' symbols.
-    Tries Bankr registry first (might have been synced more), then on-chain."""
-    await asyncio.sleep(45)  # let initial indexing settle
+    """Background task: re-resolve tokens that still show '?' or missing
+    creator handle. Iterates through all tracked tokens periodically and
+    queries the Bankr live token-fees endpoint."""
+    await asyncio.sleep(15)
     async with httpx.AsyncClient() as cli:
         while True:
             try:
@@ -714,8 +730,11 @@ async def token_resolver_loop():
                         {"creator_handle": {"$in": [None, ""]}},
                     ]},
                     {"_id": 0, "address": 1, "symbol": 1, "creator_handle": 1},
-                ).limit(30)
-                tokens_to_fix = await cur.to_list(30)
+                ).limit(100)
+                tokens_to_fix = await cur.to_list(100)
+                if not tokens_to_fix:
+                    await asyncio.sleep(60)
+                    continue
                 fixed = 0
                 for t in tokens_to_fix:
                     addr = t["address"]
@@ -729,20 +748,19 @@ async def token_resolver_loop():
                         new_name = bcr.get("name_from_registry")
                         handle = bcr.get("handle")
                         avatar = bcr.get("avatar")
-                    else:
-                        # try Bankr live token-fees endpoint
+                    if not handle:
                         live = await fetch_bankr_token_creator_live(addr, cli)
-                        if live.get("symbol_from_registry"):
+                        if not new_sym and live.get("symbol_from_registry"):
                             new_sym = live["symbol_from_registry"]
                             new_name = live.get("name_from_registry")
                         if live.get("handle"):
                             handle = live["handle"]
                             avatar = live.get("avatar")
-                        if not new_sym:
-                            meta = await fetch_token_meta_onchain(addr, cli)
-                            if meta["symbol"] not in ("TOK", "?", "Unknown"):
-                                new_sym = meta["symbol"]
-                                new_name = meta["name"]
+                    if not new_sym and (not t.get("symbol") or t.get("symbol") in ("TOK", "?", "Unknown")):
+                        meta = await fetch_token_meta_onchain(addr, cli)
+                        if meta["symbol"] not in ("TOK", "?", "Unknown"):
+                            new_sym = meta["symbol"]
+                            new_name = meta["name"]
                     if new_sym or handle:
                         token_set: Dict[str, Any] = {}
                         if new_sym:
@@ -752,7 +770,6 @@ async def token_resolver_loop():
                             token_set["creator_handle"] = handle
                             token_set["creator_avatar"] = avatar or f"https://unavatar.io/x/{handle}"
                         await db.tokens.update_one({"address": addr}, {"$set": token_set})
-                        # propagate to existing claim events
                         evt_set: Dict[str, Any] = {}
                         if new_sym:
                             evt_set["token_symbol"] = new_sym
@@ -765,12 +782,12 @@ async def token_resolver_loop():
                                 {"token_address": addr}, {"$set": evt_set}
                             )
                         fixed += 1
-                    await asyncio.sleep(0.8)
+                    await asyncio.sleep(0.4)  # authenticated — faster
                 if fixed:
-                    logger.info(f"token_resolver: fixed {fixed} tokens")
+                    logger.info(f"token_resolver: fixed {fixed} of {len(tokens_to_fix)} tokens")
             except Exception as e:
                 logger.warning(f"token_resolver error: {e}")
-            await asyncio.sleep(30)
+            await asyncio.sleep(10)
 
 
 # ============================================================
