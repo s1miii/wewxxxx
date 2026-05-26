@@ -405,11 +405,10 @@ def build_telegram_message(event: Dict[str, Any]) -> Dict[str, Any]:
     token_addr = event.get("token_address") or ""
     handle = event.get("claimer_handle")
     benef = event.get("beneficiary") or event.get("claimer_wallet") or ""
-    benef_short = f"{benef[:6]}…{benef[-4:]}" if benef else "?"
     if handle:
-        benef_line = f"@{_esc_html(handle)} (<code>{benef_short}</code>)"
+        benef_line = f"@{_esc_html(handle)} (<code>{_esc_html(benef)}</code>)"
     else:
-        benef_line = f"<code>{benef_short}</code>"
+        benef_line = f"<code>{_esc_html(benef)}</code>"
 
     symbol = _esc_html(event.get("token_symbol") or "?")
     name = _esc_html(event.get("token_name") or "?")
@@ -418,14 +417,13 @@ def build_telegram_message(event: Dict[str, Any]) -> Dict[str, Any]:
     usd_amount = _fmt_compact_usd(event.get("released_usd") or 0)
     mc = _fmt_compact_usd(event.get("market_cap_usd") or 0)
     liq = _fmt_compact_usd(event.get("liquidity_usd") or 0)
-    contract_short = f"{token_addr[:6]}…{token_addr[-4:]}" if token_addr else "?"
 
     text = (
         "🎉 <b>NEW BANKR FEE CLAIMED!</b>\n\n"
         "<b>Token Information:</b>\n"
         f"• Name: <b>{name}</b>\n"
         f"• Symbol: <b>${symbol}</b>\n"
-        f"• Contract: <code>{contract_short}</code>\n"
+        f"• Contract: <code>{_esc_html(token_addr)}</code>\n"
         f"• Market Cap: <b>{mc}</b>\n"
         f"• Liquidity: <b>{liq}</b>\n\n"
         "<b>Released to Beneficiary:</b>\n"
@@ -434,7 +432,7 @@ def build_telegram_message(event: Dict[str, Any]) -> Dict[str, Any]:
         f"• Beneficiary: {benef_line}"
     )
 
-    # Inline keyboard — 3 buttons as requested
+    # Inline keyboard — 3 buttons as requested + X Beneficiary if handle resolved
     keyboard: List[List[Dict[str, str]]] = []
     if token_addr:
         keyboard.append([
@@ -445,6 +443,10 @@ def build_telegram_message(event: Dict[str, Any]) -> Dict[str, Any]:
         ])
         keyboard.append([
             {"text": "🔍 Search on X", "url": f"https://twitter.com/search?q={token_addr}"},
+        ])
+    if handle:
+        keyboard.append([
+            {"text": f"𝕏 Beneficiary @{handle}", "url": f"https://twitter.com/{handle}"},
         ])
 
     return {"text": text, "reply_markup": {"inline_keyboard": keyboard}}
