@@ -1,48 +1,42 @@
 """
-Bankr Bot Telegram Alerter — standalone VPS worker
-==================================================
-Single-file script. Watches Base chain for Bankr fee-locker `Released` events
-and pushes formatted alerts to Telegram. No database, no FastAPI.
+Bankr Bot Telegram Alerter — single-file VPS worker (no .env)
+=============================================================
+Edit the CONFIG block below with your secrets, then run:
 
-Setup on Ubuntu:
-    sudo apt install python3-pip python3-venv -y
-    python3 -m venv venv && source venv/bin/activate
-    pip install httpx python-dotenv
-
-    cp .env.example .env
-    nano .env                       # fill in your secrets
-    python3 bankr_alerter.py        # test run
-
-To run 24/7 see the systemd service in `bankr-alerter.service`.
+    pip install httpx
+    python3 bankr_alerter.py
 """
 from __future__ import annotations
 
-import os
-import sys
 import asyncio
 import logging
+import sys
 from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
-from dotenv import load_dotenv
 
-load_dotenv()
+# ===========================================================
+#                       CONFIG — EDIT HERE
+# ===========================================================
+TELEGRAM_BOT_TOKEN = "PASTE_YOUR_BOT_TOKEN_HERE"   # e.g. "8335281387:AAH..."
+TELEGRAM_CHAT_ID   = "PASTE_YOUR_CHAT_ID_HERE"     # e.g. "-1003915211068"
+BANKR_API_KEY      = "PASTE_YOUR_BANKR_API_KEY"    # optional, "" to disable
 
-# ---------------------------------------------------------------------------
-# Config — from .env
-# ---------------------------------------------------------------------------
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-BANKR_API_KEY = os.environ.get("BANKR_API_KEY", "")
-POLL_INTERVAL_S = int(os.environ.get("POLL_INTERVAL_S", "15"))
-INITIAL_LOOKBACK_BLOCKS = int(os.environ.get("INITIAL_LOOKBACK_BLOCKS", "5"))
-MIN_ETH_AMOUNT = float(os.environ.get("MIN_ETH_AMOUNT", "0"))
-MIN_MARKET_CAP_USD = float(os.environ.get("MIN_MARKET_CAP_USD", "0"))
+# How often to poll the chain (seconds)
+POLL_INTERVAL_S = 15
 
-TELEGRAM_API = (f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-                if TELEGRAM_BOT_TOKEN else None)
+# On first start, look back this many blocks (keep small to avoid old alerts)
+INITIAL_LOOKBACK_BLOCKS = 5
+
+# Whale filter — set both to 0 to alert on ALL claims
+MIN_ETH_AMOUNT     = 0      # only alert when claim >= this ETH amount
+MIN_MARKET_CAP_USD = 0      # ...OR when token MC >= this USD
+# ===========================================================
+
+
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 BANKR_HEADERS = ({"Authorization": f"Bearer {BANKR_API_KEY}",
                   "x-api-key": BANKR_API_KEY} if BANKR_API_KEY else {})
 
@@ -68,7 +62,6 @@ logging.basicConfig(level=logging.INFO,
                     stream=sys.stdout)
 log = logging.getLogger("bankr")
 
-# in-memory caches — reset on container restart
 _token_cache: Dict[str, Dict[str, Any]] = {}
 _bankr_cache: Dict[str, Dict[str, Any]] = {}
 _ds_cache: Dict[str, Dict[str, Any]] = {}
@@ -79,9 +72,7 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# ---------------------------------------------------------------------------
-# RPC helpers
-# ---------------------------------------------------------------------------
+# ---------- RPC ----------
 _rpc_idx = 0
 
 
@@ -93,7 +84,7 @@ async def rpc(method: str, params: list, cli: httpx.AsyncClient,
         url = fixed_url or BASE_RPC_FALLBACKS[_rpc_idx % len(BASE_RPC_FALLBACKS)]
         try:
             r = await cli.post(url, json={
-                "jsonrpc": "2.0", "method": method, "params": params, "id": 1
+                "jsonrpc": "2.0", "method": method, "params": params, "id": 1,
             }, timeout=20.0)
             if r.status_code == 429:
                 _rpc_idx += 1
@@ -119,27 +110,25 @@ async def get_block_number(cli: httpx.AsyncClient) -> int:
     return int(await rpc("eth_blockNumber", [], cli), 16)
 
 
-async def get_released_logs(from_block: int, to_block: int,
+async def get_released_logs(from_b: int, to_b: int,
                              cli: httpx.AsyncClient) -> List[Dict]:
     return await rpc("eth_getLogs", [{
         "address": KNOWN_LOCKERS,
-        "fromBlock": hex(from_block),
-        "toBlock": hex(to_block),
+        "fromBlock": hex(from_b),
+        "toBlock": hex(to_b),
         "topics": [RELEASED_TOPIC],
     }], cli)
 
 
-async def get_outbound_transfers(from_block: int, to_block: int,
+async def get_outbound_transfers(from_b: int, to_b: int,
                                   cli: httpx.AsyncClient) -> List[Dict]:
-    """Locker → beneficiary Transfer logs. Uses mainnet.base.org (allows
-    queries without address filter)."""
     out: List[Dict] = []
     for locker in KNOWN_LOCKERS:
         padded = "0x" + "0" * 24 + locker[2:]
         try:
             logs = await rpc("eth_getLogs", [{
-                "fromBlock": hex(from_block),
-                "toBlock": hex(to_block),
+                "fromBlock": hex(from_b),
+                "toBlock": hex(to_b),
                 "topics": [ERC20_TRANSFER_TOPIC, padded],
             }], cli, fixed_url="https://mainnet.base.org")
             out.extend(logs)
@@ -149,9 +138,7 @@ async def get_outbound_transfers(from_block: int, to_block: int,
     return out
 
 
-# ---------------------------------------------------------------------------
-# Token metadata + Bankr + DexScreener
-# ---------------------------------------------------------------------------
+# ---------- Metadata ----------
 SEL_SYMBOL = "0x95d89b41"
 SEL_NAME = "0x06fdde03"
 SEL_DECIMALS = "0x313ce567"
@@ -275,9 +262,7 @@ async def eth_price_loop(cli: httpx.AsyncClient) -> None:
         await asyncio.sleep(300)
 
 
-# ---------------------------------------------------------------------------
-# Message formatting
-# ---------------------------------------------------------------------------
+# ---------- Formatting ----------
 def _esc(s: Any) -> str:
     if s is None:
         return ""
@@ -350,15 +335,13 @@ async def send_telegram(event: Dict[str, Any], cli: httpx.AsyncClient) -> bool:
         }, timeout=10.0)
         if r.status_code == 200 and r.json().get("ok"):
             return True
-        log.warning(f"telegram send failed: {r.status_code} {r.text[:200]}")
+        log.warning(f"telegram failed: {r.status_code} {r.text[:200]}")
     except Exception as e:
         log.warning(f"telegram exception: {e}")
     return False
 
 
-# ---------------------------------------------------------------------------
-# Event processing
-# ---------------------------------------------------------------------------
+# ---------- Event processing ----------
 def _idx_transfers(transfers: List[Dict]) -> Dict[str, List[Dict]]:
     idx: Dict[str, List[Dict]] = {}
     for t in transfers:
@@ -380,12 +363,11 @@ def find_token(tx_transfers: List[Dict], locker: str,
     return None
 
 
-async def process_event(log_entry: Dict[str, Any],
-                         tx_transfers: List[Dict[str, Any]],
+async def process_event(entry: Dict[str, Any], tx_transfers: List[Dict[str, Any]],
                          cli: httpx.AsyncClient) -> Optional[Dict[str, Any]]:
-    locker = log_entry["address"].lower()
-    beneficiary = "0x" + log_entry["topics"][2][-40:].lower()
-    data = log_entry["data"].replace("0x", "")
+    locker = entry["address"].lower()
+    beneficiary = "0x" + entry["topics"][2][-40:].lower()
+    data = entry["data"].replace("0x", "")
     amt0 = int(data[0:64], 16) if len(data) >= 64 else 0
     amt1 = int(data[64:128], 16) if len(data) >= 128 else 0
 
@@ -394,7 +376,6 @@ async def process_event(log_entry: Dict[str, Any],
 
     token_addr = find_token(tx_transfers, locker, beneficiary)
 
-    # Figure out which leg is the token and which is WETH
     tok_raw, weth_raw = amt0, amt1
     if token_addr:
         if int(token_addr, 16) > int(WETH_BASE, 16):
@@ -446,9 +427,7 @@ async def process_event(log_entry: Dict[str, Any],
     }
 
 
-# ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
+# ---------- Main loop ----------
 async def indexer_loop(cli: httpx.AsyncClient) -> None:
     log.info("Bankr Telegram alerter started")
     log.info(f"  Telegram chat: {TELEGRAM_CHAT_ID}")
@@ -458,8 +437,8 @@ async def indexer_loop(cli: httpx.AsyncClient) -> None:
     last_block = max(0, tip - INITIAL_LOOKBACK_BLOCKS)
     log.info(f"Starting from block {last_block} (tip {tip})")
 
-    seen_set: set = set()
     seen_deque: deque = deque(maxlen=2000)
+    seen_set: set = set()
 
     while True:
         try:
@@ -467,11 +446,11 @@ async def indexer_loop(cli: httpx.AsyncClient) -> None:
             if last_block >= tip:
                 await asyncio.sleep(POLL_INTERVAL_S)
                 continue
-            from_block = last_block + 1
-            to_block = min(tip, from_block + 200 - 1)
+            from_b = last_block + 1
+            to_b = min(tip, from_b + 200 - 1)
 
-            released = await get_released_logs(from_block, to_block, cli)
-            transfers = await get_outbound_transfers(from_block, to_block, cli) if released else []
+            released = await get_released_logs(from_b, to_b, cli)
+            transfers = await get_outbound_transfers(from_b, to_b, cli) if released else []
             tx_idx = _idx_transfers(transfers)
 
             alerts = 0
@@ -482,33 +461,38 @@ async def indexer_loop(cli: httpx.AsyncClient) -> None:
                 seen_deque.append(key)
                 seen_set = set(seen_deque)
 
-                event = await process_event(entry, tx_idx.get(entry["transactionHash"], []), cli)
+                event = await process_event(
+                    entry, tx_idx.get(entry["transactionHash"], []), cli,
+                )
                 if not event or event["released_weth_amount"] <= 0:
                     continue
 
-                # Whale filter (skip only if BOTH thresholds fail)
                 if MIN_ETH_AMOUNT > 0 or MIN_MARKET_CAP_USD > 0:
                     passes_eth = event["released_weth_amount"] >= MIN_ETH_AMOUNT
                     passes_mc = event["market_cap_usd"] >= MIN_MARKET_CAP_USD
                     if not (passes_eth or passes_mc):
-                        log.info(f"SKIP (filter): @{event['claimer_handle'] or '???'} "
-                                 f"{event['released_weth_amount']:.6f} ETH "
-                                 f"MC ${event['market_cap_usd']:,.0f}")
+                        log.info(
+                            f"SKIP (filter): @{event['claimer_handle'] or '???'} "
+                            f"{event['released_weth_amount']:.6f} ETH "
+                            f"MC ${event['market_cap_usd']:,.0f}"
+                        )
                         continue
 
                 ok = await send_telegram(event, cli)
                 alerts += 1 if ok else 0
-                log.info(f"{'SENT' if ok else 'FAIL'} @{event['claimer_handle'] or '???'} "
-                         f"{event['released_token_amount']:.4f} ${event['token_symbol']} "
-                         f"+ {event['released_weth_amount']:.6f} ETH "
-                         f"(MC ${event['market_cap_usd']:,.0f}) "
-                         f"tx={entry['transactionHash'][:12]}")
+                log.info(
+                    f"{'SENT' if ok else 'FAIL'} @{event['claimer_handle'] or '???'} "
+                    f"{event['released_token_amount']:.4f} ${event['token_symbol']} "
+                    f"+ {event['released_weth_amount']:.6f} ETH "
+                    f"(MC ${event['market_cap_usd']:,.0f}) "
+                    f"tx={entry['transactionHash'][:12]}"
+                )
 
             if released:
-                log.info(f"blocks {from_block}-{to_block}: "
+                log.info(f"blocks {from_b}-{to_b}: "
                          f"{len(released)} released, {alerts} alerts sent")
-            last_block = to_block
-            if to_block >= tip - 5:
+            last_block = to_b
+            if to_b >= tip - 5:
                 await asyncio.sleep(POLL_INTERVAL_S)
         except Exception as e:
             log.error(f"loop error: {e}")
@@ -516,8 +500,9 @@ async def indexer_loop(cli: httpx.AsyncClient) -> None:
 
 
 async def main() -> None:
-    if not TELEGRAM_API or not TELEGRAM_CHAT_ID:
-        log.error("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set in .env")
+    if "PASTE_" in TELEGRAM_BOT_TOKEN or "PASTE_" in TELEGRAM_CHAT_ID:
+        log.error("Please edit the CONFIG block at the top of this file "
+                  "with your TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.")
         sys.exit(1)
     async with httpx.AsyncClient() as cli:
         await fetch_eth_price(cli)
